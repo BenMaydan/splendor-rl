@@ -483,12 +483,23 @@ class SplendorEnv(gym.Env):
             self.num_cards_in_hand[current_player] += 1
             self.discounts[current_player][card[self.card_column_indexer['color']]] += 1
 
+            # update dealt + deck
+
             # Need to take into account awarding the noble of the players choice if he can get it
             available_nobles_cost = self.nobles[self.nobles[:, self.nobles_column_indexer['available']] == 1]
             deficit = self.discounts[current_player] - available_nobles_cost
             if np.any(np.all(deficit > 0, axis=1), axis=0):
                 return "pick_noble", current_player
             return self.current_phase, next_player
+        
+        def deal_new_card(tier, slot=None):
+            # deal new card to dealt assuming there are cards left
+            self.num_dealt_at_tier[tier] += 1
+            if slot is not None:
+                if self.num_dealt_at_tier[tier] < self.max_num_cards_at_tier[tier]:
+                    self.dealt[tier, slot] = self.deck[tier, self.num_dealt_at_tier[tier]]
+                else:
+                    self.dealt[tier, slot, self.card_column_indexer['available']] = 0
 
         match action_type:
             case "take_3_tokens":
@@ -515,11 +526,8 @@ class SplendorEnv(gym.Env):
                 if self.tokens_remaining[self.gold_index] > 0:
                     self.tokens_in_hand[current_player, self.gold_index] += 1
                     self.tokens_remaining[self.gold_index] -= 1
-
-                # deal new card to dealt assuming there are cards left
-                self.num_dealt_at_tier[tier] += 1
-                if self.num_dealt_at_tier[tier] < self.max_num_cards_at_tier[tier]:
-                    self.dealt[tier][slot] = self.deck[tier][self.num_dealt_at_tier[tier]]
+                
+                deal_new_card(tier, slot)
                 
                 return (0, self.current_phase, next_player)
             case "reserve_face_down":
@@ -527,7 +535,8 @@ class SplendorEnv(gym.Env):
                 # put reserved card in players reserved pile
                 self.reserved[current_player, self.num_reserved[current_player]] = self.deck[tier, self.num_dealt_at_tier[tier]]
                 self.num_reserved[current_player] += 1
-                self.num_dealt_at_tier[tier] += 1
+
+                deal_new_card(tier)
 
                 # take gold token for this player if there are tokens left
                 if self.tokens_remaining[self.gold_index] > 0:
@@ -538,6 +547,7 @@ class SplendorEnv(gym.Env):
             case "buy_face_up":
                 tier, slot = action["tier"], action["slot"]
                 next_phase, player = buy_card(self.dealt[tier][slot])
+                deal_new_card(tier, slot)
                 return (self.mini_rewards['buy_card'], next_phase, player)
             case "buy_reserved":
                 index = action["index"]
