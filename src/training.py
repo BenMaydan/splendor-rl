@@ -7,8 +7,10 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from numpy.typing import NDArray
-from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers import ActionMasker
+from sb3_contrib.common.maskable.evaluation import evaluate_policy
 import math
 import random
 import pandas as pd
@@ -42,7 +44,7 @@ class SplendorEnv(gym.Env):
         self.num_total_actions = self._action_take_3_tokens + self._action_take_2_identical + self._action_reserve_face_up + self._action_reserve_face_down + self._action_buy_face_up + self._action_buy_reserved + self._action_pick_noble + self._action_discard
 
         # here we precompute some things to make it easier to create the action mask very quickly
-        all_combs_take_three_tokens = itertools.combinations(np.arange(len(self.colors)), 3)
+        all_combs_take_three_tokens = list(itertools.combinations(np.arange(len(self.colors)), 3))
         self._precomputed_combs_take_three_tokens = np.zeros((len(all_combs_take_three_tokens), 3))
         for i, comb in enumerate(all_combs_take_three_tokens):
             self._precomputed_combs_take_three_tokens[i] = comb
@@ -723,39 +725,52 @@ class SplendorEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    # 1. Instantiate the environment
-    env = SplendorEnv()
     
-    # Optional: Verify the environment follows the Gym API before training
-    # check_env(env, warn=True)
+    # 1. Define the mask extractor function
+    # MaskablePPO needs a function that takes the environment and returns the boolean mask array.
+    # Since we update self.action_mask at the end of every step() and reset(), we just return it.
+    def mask_fn(env: gym.Env) -> np.ndarray:
+        return env.action_mask
 
-    # 2. Initialize the RL model
-    # PPO (Proximal Policy Optimization) is a strong default algorithm.
-    # MlpPolicy is used for standard vector observations.
-    model = PPO("MlpPolicy", env, verbose=1)
+    # 2. Instantiate the environment and run the checker
+    env = SplendorEnv(num_players=4)
+    check_env(env)
 
-    # 3. Train the agent
-    # TODO: Adjust total_timesteps based on training needs
-    print("Starting training...")
-    model.learn(total_timesteps=100_000)
+    # 3. Wrap the environment with the ActionMasker
+    env = ActionMasker(env, mask_fn)
 
-    # 4. Save the trained model
-    model.save("splendor_ppo_model")
-    print("Model saved.")
+    # 4. Initialize the Maskable PPO model
+    # We MUST use "MultiInputPolicy" instead of "MlpPolicy" because our observation_space is a Dict.
+    # stable-baselines3 will automatically build a network to flatten and process your Dict.
+    model = MaskablePPO(
+        "MultiInputPolicy",
+        env,
+        verbose=1,
+        learning_rate=3e-4,
+        tensorboard_log="./tensorboard_logs/"
+    )
 
-    # 5. Evaluate / Test the trained agent
-    # Load the model (just to show how it's done)
-    # model = PPO.load("splendor_ppo_model")
-    
+    # 5. Train the agent
+    print("Starting training phase...")
+    # 1,000,000 is a good starting point for a game of this complexity
+    model.learn(total_timesteps=1_000_000, tb_log_name="splendor_run1") 
+
+    # 6. Save the trained model
+    model.save("splendor_maskable_ppo")
+    print("Model saved successfully.")
+
+    # 7. Evaluate / Watch the trained agent
+    # We must use the maskable version of the prediction function
     obs, info = env.reset()
-    for _ in range(50):
-        # The agent predicts the best action based on the observation
-        action, _states = model.predict(obs, deterministic=True)
+    for _ in range(100):
+        # Pass the action mask to the predict function so it doesn't choose illegal moves
+        action_masks = env.action_mask
+        action, _states = model.predict(obs, action_masks=action_masks, deterministic=True)
         
-        # The environment steps forward based on the action
         obs, reward, terminated, truncated, info = env.step(action)
         
         env.render()
         
         if terminated or truncated:
-            obs, info = env.reset()
+            print("Game Ended!")
+            break
