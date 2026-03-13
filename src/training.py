@@ -641,11 +641,85 @@ class SplendorEnv(gym.Env):
 
     def render(self):
         """
-        Renders the environment.
+        Renders the environment to the console.
         """
-        if self.render_mode == "console":
-            # TODO: Print a text representation of the board state
-            pass
+        if self.render_mode != "console":
+            return
+
+        print("\n" + "=" * 70)
+        print(f"--- Turn: {self.num_turns} | Current Player: {self.current_player} | Phase: {self.current_phase} ---")
+        print("-" * 70)
+
+        # 1. Bank (Tokens Remaining)
+        tokens_names = self.colors + ['Gold']
+        bank_strs = []
+        for i, token_name in enumerate(tokens_names):
+            bank_strs.append(f"{token_name}: {self.tokens_remaining[i]}")
+        print("BANK:  " + " | ".join(bank_strs))
+        print("-" * 70)
+
+        # 2. Nobles
+        print("NOBLES:")
+        for i in range(self.num_nobles_available):
+            noble = self.nobles[i]
+            if noble[self.nobles_column_indexer['available']] == 1:
+                reqs = []
+                for color_name in self.colors:
+                    cost = noble[self.nobles_column_indexer[color_name]]
+                    if cost > 0:
+                        reqs.append(f"{cost} {color_name}")
+                print(f"  [Noble {i}] 3 Pts | Requires: {', '.join(reqs)}")
+            else:
+                print(f"  [Noble {i}] CLAIMED")
+        print("-" * 70)
+
+        # 3. Market (Dealt Cards)
+        print("MARKET:")
+        for tier in reversed(range(self.num_tiers)):
+            print(f"  Tier {tier + 1}:")
+            for slot in range(4):
+                card = self.dealt[tier][slot]
+                if card[self.card_column_indexer['available']] == 1:
+                    points = card[self.card_column_indexer['points']]
+                    color_idx = card[self.card_column_indexer['color']]
+                    color_name = self.colors[color_idx] if color_idx < len(self.colors) else "None"
+                    
+                    costs = []
+                    for color in self.colors:
+                        cost = card[self.card_column_indexer[color]]
+                        if cost > 0:
+                            costs.append(f"{cost}{color[0]}") # e.g., "3R" for 3 Red
+                            
+                    print(f"    Slot {slot} | {points} Pts | {color_name:5} | Cost: {' '.join(costs)}")
+                else:
+                    print(f"    Slot {slot} | [ EMPTY ]")
+        print("-" * 70)
+
+        # 4. Player States
+        print("PLAYERS:")
+        for p in range(self.num_players):
+            active_marker = ">>" if p == self.current_player else "  "
+            points = self.points[p]
+            
+            # Format hand tokens
+            hand_tokens = []
+            for i, token_name in enumerate(tokens_names):
+                count = self.tokens_in_hand[p][i]
+                if count > 0:
+                    hand_tokens.append(f"{count}{token_name[0]}")
+                    
+            # Format engine discounts
+            engine = []
+            for i, color_name in enumerate(self.colors):
+                count = self.discounts[p][i]
+                if count > 0:
+                    engine.append(f"{count}{color_name[0]}")
+                    
+            num_res = self.num_reserved[p]
+            
+            print(f"{active_marker} Player {p}: {points:2} Pts | Tokens: [{', '.join(hand_tokens):15}] | Engine: [{', '.join(engine):15}] | Reserved: {num_res}")
+            
+        print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
