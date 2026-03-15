@@ -309,7 +309,7 @@ class SplendorEnv(AECEnv):
         for comb in itertools.combinations(np.arange(len(self.colors)), 3):
             self.action_mapping[action_idx] = {
                 "type": "take_3_tokens",
-                "indices": comb
+                "indices": list(comb)
             }
             action_idx += 1
         
