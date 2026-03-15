@@ -48,9 +48,9 @@ def play_against_ai(checkpoint_path):
             print(f"\n--- Your Turn ({agent_id}) ---")
             print("Action Mapping:")
             for act in valid_actions:
-                # Replace 'env.action_to_str(act)' with your env's actual mapping method
-                # Common PettingZoo/Splendor envs use a helper like this:
-                desc = env.unwrapped.decode_action(act) if hasattr(env.unwrapped, 'decode_action') else f"Action {act}"
+                # Access the 'desc' key from your env's action_mapping
+                action_info = env.unwrapped.action_mapping.get(act, {})
+                desc = action_info.get("desc", f"Action {act}")
                 print(f"  [{act}]: {desc}")
             
             action = None
@@ -74,7 +74,9 @@ def play_against_ai(checkpoint_path):
             if isinstance(action, np.ndarray):
                 action = int(action[0])
             
-            print(f"AI ({agent_id}) chose action: {action}")
+            action_info = env.unwrapped.action_mapping.get(action, {})
+            ai_desc = action_info.get("desc", f"Action {action}")
+            print(f"AI ({agent_id}) chose: [{action}] {ai_desc}")
 
         env.step(action)
         

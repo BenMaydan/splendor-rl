@@ -307,9 +307,11 @@ class SplendorEnv(AECEnv):
 
         # Action 1: taking 3 tokens
         for comb in itertools.combinations(np.arange(len(self.colors)), 3):
+            desc = ", ".join([f"1 {self.colors[comb[i]]}" for i in range(len(comb))])
             self.action_mapping[action_idx] = {
                 "type": "take_3_tokens",
-                "indices": list(comb)
+                "indices": list(comb),
+                "desc": f"Take Gems ({desc})"
             }
             action_idx += 1
         
@@ -317,7 +319,8 @@ class SplendorEnv(AECEnv):
         for color_index in range(len(self.colors)):
             self.action_mapping[action_idx] = {
                 "type": "take_2_identical_tokens",
-                "index": color_index
+                "index": color_index,
+                "desc": f"Take 2 {self.colors[color_index]} Gems"
             }
             action_idx += 1
         
@@ -328,7 +331,8 @@ class SplendorEnv(AECEnv):
                 self.action_mapping[action_idx] = {
                     "type": "reserve_face_up",
                     "tier": tier,
-                    "slot": slot
+                    "slot": slot,
+                    "desc": f"Reserve Card (Tier {tier}, Slot {slot})"
                 }
                 action_idx += 1
         
@@ -338,6 +342,7 @@ class SplendorEnv(AECEnv):
             self.action_mapping[action_idx] = {
                 "type": "reserve_face_down",
                 "tier": tier,
+                "desc": f"Reserve Face Down Card in Tier {tier}"
             }
             action_idx += 1
                 
@@ -347,16 +352,19 @@ class SplendorEnv(AECEnv):
                 self.action_mapping[action_idx] = {
                     "type": "buy_face_up",
                     "tier": tier,
-                    "slot": slot
+                    "slot": slot,
+                    "desc": f"Buy Card (Tier {tier}, Slot {slot})"
                 }
                 action_idx += 1
         
         # Action 6: Buying Reserved Cards
         # Can reserve at most 3 cards
+        desc_number = ["1st", "2nd", "3rd", "4th", "5th"]
         for index in range(3):
             self.action_mapping[action_idx] = {
                 "type": "buy_reserved",
                 "index": index,
+                "desc": f"Buy {desc_number[index]} Reserved Card"
             }
             action_idx += 1
         
@@ -364,15 +372,19 @@ class SplendorEnv(AECEnv):
         for index in range(self.num_nobles_available):
             self.action_mapping[action_idx] = {
                 "type": "pick_noble",
-                "index": index
+                "index": index,
+                "desc": f"Pick {desc_number[index]} Noble"
             }
             action_idx += 1
 
         # Action 8: Discard tokens (if you have too many)
+        desc_colors = self.colors.copy()
+        desc_colors.insert(self.gold_index, "Gold")
         for token_type in range(1 + len(self.colors)):
             self.action_mapping[action_idx] = {
                 "type": "discard_token",
                 "index": token_type,
+                "desc": f"Discard {desc_colors[token_type]} Gem"
             }
             action_idx += 1
     
