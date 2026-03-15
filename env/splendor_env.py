@@ -400,19 +400,19 @@ class SplendorEnv(AECEnv):
                 # the only cards you cannot reserve are ones that don't exist because that tier was already completely dealt out
                 s, e = self._action_indices_map["reserve_face_up"]
                 if num_reserved >= self.max_able_to_reserve:
-                    invalid_action_indices = np.ones(self._action_reserve_face_up, dtype=bool)
+                    self.action_mask[s:e] = 0
                 else:
                     invalid_action_indices = (self.dealt[..., self.card_column_indexer['available']] == 0).flatten()
-                self.action_mask[s:e][invalid_action_indices] = 0
+                    self.action_mask[s:e][invalid_action_indices] = 0
 
                 # mask out invalid actions of reserving face down card
                 # only time this is invalid is if that tier has been completely dealt out or you already reserved the max
                 s, e = self._action_indices_map["reserve_face_down"]
                 if num_reserved >= self.max_able_to_reserve:
-                    invalid_action_indices = np.ones(self._action_reserve_face_down, dtype=bool)
+                    self.action_mask[s:e] = 0
                 else:
                     invalid_action_indices = (self.num_dealt_at_tier >= self.max_num_cards_at_tier)
-                self.action_mask[s:e][invalid_action_indices] = 0
+                    self.action_mask[s:e][invalid_action_indices] = 0
 
                 # mask out invalid actions of buying face up card
                 # an invalid action is: not (card available and card purchasable), which is de'morgans law
@@ -531,7 +531,7 @@ class SplendorEnv(AECEnv):
             case "reserve_face_up":
                 tier, slot = action["tier"], action["slot"]
                 # put reserved card in players reserved pile
-                self.reserved[current_player, self.num_reserved[current_player]] = self.dealt[tier][slot]
+                self.reserved[current_player, self.num_reserved[current_player]] = self.dealt[tier, slot]
                 self.num_reserved[current_player] += 1
 
                 # take gold token for this player if there are tokens left
@@ -700,13 +700,8 @@ class SplendorEnv(AECEnv):
         self.rewards[agent] += self.discourage_stalling
         
         # Advance to the next agent
-        # Note: If phase changes but player doesn't (e.g. going into 'discard' phase), 
-        # we need to manually handle self.agent_selection instead of simply cycling.
-        if next_player == self.current_player and not (is_terminated or is_truncated):
-             # Keep it the same agent's turn
-             self.agent_selection = agent
-        else:
-             self.agent_selection = f"player_{next_player}"
+        if not (is_terminated or is_truncated):
+            self.agent_selection = f"player_{next_player}"
              
         self._accumulate_rewards()
         
