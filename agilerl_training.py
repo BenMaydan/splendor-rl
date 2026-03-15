@@ -165,8 +165,8 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
 
 if __name__ == "__main__":
     train(
-        max_episodes=5_000_000, 
-        max_hours=12.0, 
+        max_episodes=1_000_000,
+        # max_hours=12.0, 
         checkpoint_minutes=30.0, 
-        checkpoint_episodes=10_000
+        checkpoint_episodes=2_000
     )
