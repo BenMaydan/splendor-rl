@@ -690,8 +690,22 @@ class SplendorEnv(AECEnv):
         is_terminated = self.termination_condition()
         
         if is_terminated or is_truncated:
-            winner = np.argmax(self.points)
+            # first we need to find the winner, taking into account potential ties in points
+            max_points = np.max(self.points)
+            candidates = np.where(self.points == max_points)[0]
+            
+            # 3. Apply the tie-breaker if necessary
+            if len(candidates) > 1:
+                # Get the card counts only for the tied players
+                candidate_cards = self.num_cards_in_hand[candidates]
+                # Find the index of the candidate with the minimum cards
+                winning_candidate_idx = np.argmin(candidate_cards)
+                winner = candidates[winning_candidate_idx]
+            else:
+                winner = candidates[0]
+
             winner_points = self.points[winner]
+
             mask = np.ones(self.points.shape, dtype=bool)
             mask[winner] = False
             sum_loser_points = np.sum(self.points[mask])
