@@ -2,18 +2,20 @@ import os
 import torch
 import torch.nn as nn
 import numpy as np
-from torch.utils.tensorboard import SummaryWriter
 
 # Tianshou imports
 from tianshou.data import Batch
 from tianshou.env import PettingZooEnv, DummyVectorEnv
-from tianshou.policy import PPOPolicy, MultiAgentPolicyManager
-from tianshou.trainer import onpolicy_trainer
-from tianshou.utils.net.discrete import Actor, Critic
+from tianshou.algorithm import PPO
+from tianshou.algorithm.multiagent.marl import MultiAgentOnPolicyAlgorithm
+from tianshou.data import Collector, VectorReplayBuffer
+from tianshou.trainer import OnPolicyTrainer, OnPolicyTrainerParams
+from tianshou.utils.net.discrete import DiscreteActor, DiscreteCritic
 from tianshou.utils import TensorboardLogger
+from torch.utils.tensorboard import SummaryWriter
 
 # Import your custom environment here
-# from splendor_env import SplendorEnv 
+from env.splendor_env import SplendorEnv 
 
 class SplendorFeatureExtractor(nn.Module):
     """
@@ -88,7 +90,7 @@ def train_splendor():
     # 1. Setup Environment Generators
     # Tianshou's PettingZooEnv wrapper natively handles the AEC cycle
     def env_generator():
-        env = SplendorEnv(num_players=2, render_mode=None)
+        env = SplendorEnv(num_players=4, render_mode=None)
         return PettingZooEnv(env)
     
     # We use DummyVectorEnv for parallel processing during collection
@@ -105,8 +107,8 @@ def train_splendor():
     actor_net = SplendorActionMaskNet(action_shape, device=device).to(device)
     critic_net = SplendorActionMaskNet(1, device=device).to(device)
     
-    actor = Actor(actor_net, action_shape, device=device).to(device)
-    critic = Critic(critic_net, device=device).to(device)
+    actor = DiscreteActor(actor_net, action_shape, device=device).to(device)
+    critic = DiscreteCritic(critic_net, device=device).to(device)
 
     # 4. Setup Optimizer and PPO Policy
     optim = torch.optim.Adam(set(actor.parameters()).union(critic.parameters()), lr=3e-4)
@@ -114,11 +116,11 @@ def train_splendor():
     def dist_fn(logits):
         return torch.distributions.Categorical(logits=logits)
         
-    policy = PPOPolicy(
-        actor, 
-        critic, 
-        optim, 
-        dist_fn, 
+    ppo_algo = PPO(
+        actor=actor, 
+        critic=critic, 
+        optim=optim, 
+        dist_fn=dist_fn, 
         action_space=sample_env.action_space,
         deterministic_eval=True,
         action_scaling=False
@@ -127,18 +129,20 @@ def train_splendor():
     # 5. Multi-Agent Parameter Sharing
     # We tell Tianshou that all agents in the environment share the exact same policy
     agents = sample_env.agents
-    multi_agent_policy = MultiAgentPolicyManager([policy for _ in range(len(agents))], sample_env)
+    multi_agent_algo = MultiAgentOnPolicyAlgorithm(
+        algorithms=[ppo_algo for _ in range(len(agents))], 
+        env=sample_env
+    )
 
     # 6. Setup Data Collectors
     # Collectors handle the actual playing of the game and storing transitions
-    from tianshou.data import Collector, VectorReplayBuffer
     train_collector = Collector(
-        multi_agent_policy, 
+        multi_agent_algo, 
         train_envs, 
         VectorReplayBuffer(20000, len(train_envs)),
         exploration_noise=True
     )
-    test_collector = Collector(multi_agent_policy, test_envs, exploration_noise=False)
+    test_collector = Collector(multi_agent_algo, test_envs, exploration_noise=False)
 
     # 7. Setup TensorBoard Logging
     log_path = os.path.join("log", "splendor_ppo")
@@ -146,24 +150,34 @@ def train_splendor():
     logger = TensorboardLogger(writer)
 
     # 8. Execute the Training Loop
-    print(f"Starting training on {device}...")
-    result = onpolicy_trainer(
-        multi_agent_policy,
-        train_collector,
-        test_collector,
-        max_epoch=50,
-        step_per_epoch=10000,
-        repeat_per_collect=10,
-        episode_per_test=10,
+    print("Starting training...")
+    
+    # Instantiate the new params dataclass
+    trainer_params = OnPolicyTrainerParams(
+        training_collector=train_collector,
+        test_collector=test_collector,
+        max_epochs=50,
+        epoch_num_steps=10000,
+        update_step_num_repetitions=10,
+        test_step_num_episodes=10,
         batch_size=256,
-        step_per_collect=2000,
+        collection_step_num_env_steps=2000,
         logger=logger,
     )
+    
+    # Instantiate the trainer with the algorithm and the params object
+    trainer = OnPolicyTrainer(
+        algorithm=multi_agent_algo, 
+        params=trainer_params
+    )
+    
+    # Execute the training loop
+    result = trainer.run()
 
     print(f"Training completed. Final metrics: {result}")
     
-    # Save the shared policy
-    torch.save(policy.state_dict(), "splendor_shared_policy.pth")
+    # Save the shared policy's state dict
+    torch.save(ppo_algo.state_dict(), "splendor_shared_policy.pth")
     print("Model saved to splendor_shared_policy.pth")
 
 if __name__ == "__main__":
