@@ -396,6 +396,12 @@ class SplendorEnv(AECEnv):
             case "main":
                 self.action_mask[:] = 1
 
+                # mask out picking noble and discarding since that is not allowed in the main phase
+                s, e = self._action_indices_map["pick_noble"]
+                self.action_mask[s:e] = 0
+                s, e = self._action_indices_map["discard"]
+                self.action_mask[s:e] = 0
+
                 num_reserved = self.num_reserved[self.current_player]
 
                 # mask out invalid actions of taking three tokens using advanced numpy magic to avoid python for loops
@@ -598,11 +604,13 @@ class SplendorEnv(AECEnv):
                 self.reserved[current_player, self.num_reserved[current_player]:, :] = 0
                 return (self.mini_rewards['buy_card'], next_phase, player)
             case "pick_noble":
+                assert self.current_phase == "pick_noble", "Pick noble action taken outside of pick noble phase!"
                 index = action["index"]
                 self.points[current_player] += 3
                 self.nobles[index, self.nobles_column_indexer['available']] = 0
                 return (self.mini_rewards['get_noble'], "main", next_player)
             case "discard_token":
+                assert self.current_phase == "discard", "Discard action taken outside of discard phase!"
                 index = action["index"]
                 self.tokens_remaining[index] += 1
                 self.tokens_in_hand[current_player][index] -= 1
