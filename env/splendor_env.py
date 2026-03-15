@@ -124,7 +124,8 @@ class SplendorEnv(AECEnv):
             'buy_card': 0.01,
             'get_noble': 0.05,
         }
-        self.win_points = 100
+        self.lose_points = 100
+        self.win_points = (self.num_players - 1) * self.lose_points
         self.discourage_stalling = -0.01
 
         self.initialize_nobles()
@@ -693,12 +694,12 @@ class SplendorEnv(AECEnv):
             winner_points = self.points[winner]
             mask = np.ones(self.points.shape, dtype=bool)
             mask[winner] = False
-            best_opponent_points = np.max(self.points[mask])
+            sum_loser_points = np.sum(self.points[mask])
             for i in range(self.num_players):
                 if i == winner:
-                    self.rewards[f"player_{i}"] += self.win_points + winner_points - best_opponent_points
+                    self.rewards[f"player_{i}"] += self.win_points + (self.num_players - 1) * winner_points - sum_loser_points
                 else:
-                    self.rewards[f"player_{i}"] += -self.win_points + self.points[i] - winner_points
+                    self.rewards[f"player_{i}"] += -self.lose_points - (winner_points - self.points[i])
             
             # we terminate/truncate all the agents so the environment can be reset to play another game
             for a in self.agents:
