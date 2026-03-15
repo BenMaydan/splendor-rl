@@ -16,14 +16,15 @@ class OnPolicyRolloutBuffer:
     """
     def __init__(self):
         self.states, self.actions, self.log_probs = [], [], []
-        self.rewards, self.dones, self.values = [], [], []
+        self.rewards, self.terminations, self.truncations, self.values = [], [], [], []
 
-    def add(self, state, action, log_prob, reward, done, value):
+    def add(self, state, action, log_prob, reward, termination, truncation, value):
         self.states.append(state)
         self.actions.append(action)
         self.log_probs.append(log_prob)
         self.rewards.append(reward)
-        self.dones.append(done)
+        self.terminations.append(termination)
+        self.truncations.append(truncation)
         self.values.append(value)
 
     def get_experiences(self, next_state):
@@ -32,16 +33,17 @@ class OnPolicyRolloutBuffer:
             self.actions, 
             self.log_probs, 
             self.rewards, 
-            self.dones, 
+            self.terminations, # Replaces dones
+            self.truncations,  # Replaces dones
             self.values, 
-            next_state
+            next_state         # 8th element
         )
         self.clear()
         return experiences
 
     def clear(self):
         self.states, self.actions, self.log_probs = [], [], []
-        self.rewards, self.dones, self.values = [], [], []
+        self.rewards, self.terminations, self.truncations, self.values = [], [], [], []
         
     def __len__(self):
         return len(self.states)
@@ -106,7 +108,9 @@ def train():
             # If this agent acted previously, complete the transition and add to buffer
             if last_step_data[agent_id] is not None:
                 prev_s, prev_a, prev_lp, prev_v = last_step_data[agent_id]
-                buffer.add(prev_s, prev_a, prev_lp, reward, done, prev_v)
+                
+                # Pass termination and truncation separately
+                buffer.add(prev_s, prev_a, prev_lp, reward, termination, truncation, prev_v)
                 episode_rewards[agent_id] += reward
                 
             if done:
