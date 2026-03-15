@@ -8,6 +8,7 @@ import math
 import random
 import pandas as pd
 import itertools
+import os
 
 class SplendorEnv(AECEnv):
     """
@@ -75,11 +76,6 @@ class SplendorEnv(AECEnv):
             "discard": [self._action_indices[7], self._action_indices[8]],
         }
 
-        # initializing action space + mask
-        self.action_mapping = {}
-        self._build_action_space()
-        self.action_mask = np.ones((self.num_total_actions,), dtype=np.uint8)
-
         # Initializing internal game state variables
         self.get_next_player = lambda: (self.current_player + 1) % self.num_players
 
@@ -93,8 +89,8 @@ class SplendorEnv(AECEnv):
         self.dealt = None
         self.max_num_cards_at_tier = None
         self.num_dealt_at_tier = None
-        self.card_observation_limits_low = None
-        self.card_observation_limits_high = None
+        self.dealt_observation_limits_low = None
+        self.dealt_observation_limits_high = None
 
         self.points = None
         self.reserved = None
@@ -112,8 +108,8 @@ class SplendorEnv(AECEnv):
         self.nobles_observation_limits_low = None
         self.nobles_observation_limits_high = None
         self.num_nobles_points = 3
-        nobles_columns = ['available'] + self.colors
-        self.nobles_column_indexer = {column: i for i, column in enumerate(nobles_columns)}
+        self.nobles_columns = ['available'] + self.colors
+        self.nobles_column_indexer = {column: i for i, column in enumerate(self.nobles_columns)}
         self.nobles_color_indices = [self.nobles_column_indexer[c] for c in self.colors]
 
         self.phases = ['main', 'pick_noble', 'discard']
@@ -122,9 +118,6 @@ class SplendorEnv(AECEnv):
         self.current_player = 0
         self.num_turns = 0
         self.termination_condition = lambda: (self.num_turns % self.num_players == 0 and np.any(self.points >= 15))
-        # cant make another turn condition is to give a reward to the agent responsible
-        # but it does not terminate the game and reset the environment since other "agents" still need to make a final turn
-        self.cant_make_another_turn_condition = lambda: np.any(self.points >= 15)
         self.truncation_condition = lambda: (self.num_turns >= maximum_total_turns)
 
         self.mini_rewards = {
@@ -140,20 +133,22 @@ class SplendorEnv(AECEnv):
 
         # initializing observation space
         self.single_observation_space = spaces.Dict({
-            "phase": spaces.Discrete(len(self.phases), dtype=np.uint8),
-            "relative_player_seat": spaces.Box(low=0, high=4, shape=(1,), dtype=np.uint8),
-            "tier_1_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[0], shape=(1,), dtype=np.uint8),
-            "tier_2_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[1], shape=(1,), dtype=np.uint8),
-            "tier_3_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[2], shape=(1,), dtype=np.uint8),
-            "nobles_remaining": spaces.Box(low=0, high=5, shape=(1,), dtype=np.uint8),
-            "tokens_remaining": spaces.Box(low=0, high=7, shape=self.tokens_remaining.shape, dtype=np.uint8),
-            "dealt": spaces.Box(low=self.card_observation_limits_low, high=self.card_observation_limits_high, shape=self.dealt.shape, dtype=np.uint8),
-            "nobles": spaces.Box(low=self.nobles_observation_limits_low, high=self.nobles_observation_limits_high, shape=self.nobles.shape, dtype=np.uint8),
-            "points": spaces.Box(low=0, high=22, shape=self.points.shape, dtype=np.int8),
-            "reserved": spaces.Box(low=0, high=7, shape=self.reserved.shape, dtype=np.uint8),
-            "discounts": spaces.Box(low=0, high=self.max_num_of_color, shape=self.discounts.shape, dtype=np.int8),
-            "num_cards_in_hand": spaces.Box(low=0, high=30, shape=self.num_cards_in_hand.shape, dtype=np.uint8),
-            "tokens_in_hand": spaces.Box(low=0, high=7, shape=self.tokens_in_hand.shape, dtype=np.int8),
+            "observation": spaces.Dict({
+                "phase": spaces.Discrete(len(self.phases)),
+                "relative_player_seat": spaces.Box(low=0, high=4, shape=(1,), dtype=np.uint8),
+                "tier_1_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[0], shape=(1,), dtype=np.uint8),
+                "tier_2_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[1], shape=(1,), dtype=np.uint8),
+                "tier_3_remaining": spaces.Box(low=0, high=self.max_num_cards_at_tier[2], shape=(1,), dtype=np.uint8),
+                "nobles_remaining": spaces.Box(low=0, high=5, shape=(1,), dtype=np.uint8),
+                "tokens_remaining": spaces.Box(low=0, high=7, shape=self.tokens_remaining.shape, dtype=np.uint8),
+                "dealt": spaces.Box(low=self.dealt_observation_limits_low, high=self.dealt_observation_limits_high, shape=self.dealt.shape, dtype=np.uint8),
+                "nobles": spaces.Box(low=self.nobles_observation_limits_low, high=self.nobles_observation_limits_high, shape=self.nobles.shape, dtype=np.uint8),
+                "points": spaces.Box(low=0, high=22, shape=self.points.shape, dtype=np.int8),
+                "reserved": spaces.Box(low=0, high=7, shape=self.reserved.shape, dtype=np.uint8),
+                "discounts": spaces.Box(low=0, high=self.max_num_of_color, shape=self.discounts.shape, dtype=np.int8),
+                "num_cards_in_hand": spaces.Box(low=0, high=30, shape=self.num_cards_in_hand.shape, dtype=np.uint8),
+                "tokens_in_hand": spaces.Box(low=0, high=7, shape=self.tokens_in_hand.shape, dtype=np.int8)
+            }),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.num_total_actions,), dtype=np.uint8)
         })
 
@@ -164,12 +159,20 @@ class SplendorEnv(AECEnv):
         self.observation_spaces = {
             agent: self.single_observation_space for agent in self.possible_agents
         }
+
+        # initializing action mapping and mask
+        self.action_mapping = {}
+        self.action_mask = np.ones((self.num_total_actions,), dtype=np.uint8)
+        self._build_action_space()
     
     def initialize_nobles(self, seed=None):
         """
         Writes all the possible nobles to the deck to initialize, to start the game
         """
-        df = pd.read_csv('nobles.csv', dtype=np.uint8)
+        # (available, *color_requirements)
+        self.nobles = np.zeros((self.max_num_nobles, len(self.nobles_columns)), dtype=np.uint8)
+
+        df = pd.read_csv(os.path.join(os.getcwd(), 'env', 'nobles.csv'), dtype=np.uint8)
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
         self.nobles_observation_limits_low = np.zeros(self.nobles.shape, dtype=np.uint8)
@@ -181,22 +184,26 @@ class SplendorEnv(AECEnv):
             self.nobles_observation_limits_low[:, i] = df_min[color]
             self.nobles_observation_limits_high[:, i] = df_max[color]
         
-        # (available, *color_requirements)
-        self.nobles = np.zeros((self.max_num_nobles, 2 + len(self.colors)), dtype=np.uint8)
         self.nobles[:self.num_nobles_available, self.nobles_column_indexer['available']] = 1
-        self.nobles[:, 1:] = df[self.colors].to_numpy(dtype=np.uint8)[:self.num_nobles_available]
+        self.nobles[:self.num_nobles_available, self.nobles_color_indices] = df[self.colors].to_numpy(dtype=np.uint8)[:self.num_nobles_available]
     
     def initialize_deck(self, seed=None):
         """
         Writes all the possible cards to the deck to initialize, to start the game
         """
-        df = pd.read_csv('cards.csv', dtype=np.uint8)
+        # Read without forcing uint8 on string columns - then shuffle
+        df = pd.read_csv(os.path.join(os.getcwd(), 'env', 'cards.csv'))
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
+        # Handle color mapping BEFORE casting to uint8
         self.max_num_of_color = np.count_nonzero(df['color'] == self.colors[0])
-
         color_indices = {color: i for i, color in enumerate(self.colors)}
         df['color'] = df['color'].map(color_indices)
+
+        # Now that 'color' is numeric, cast the whole dataframe to uint8
+        # Since everything is now an integer it should not throw an error
+        df = df.astype(np.uint8)
+
         num_tiers = max(df['level'])
         num_cards = [np.count_nonzero(df['level'] == i) for i in range(1, num_tiers + 1)]
 
@@ -204,15 +211,16 @@ class SplendorEnv(AECEnv):
         self.max_num_cards_at_tier = np.zeros((num_tiers,), dtype=np.uint8)
         self.num_dealt_at_tier = np.zeros((num_tiers,), dtype=np.uint8) + 4
 
-        self.card_observation_limits_low = np.zeros(self.deck.shape, dtype=np.uint8)
-        self.card_observation_limits_high = np.zeros(self.deck.shape, dtype=np.uint8)
+        dealt_shape = (num_tiers, 4, self.card_num_columns)
+        self.dealt_observation_limits_low = np.zeros(dealt_shape, dtype=np.uint8)
+        self.dealt_observation_limits_high = np.zeros(dealt_shape, dtype=np.uint8)
 
         # setting global maximum observation limits for data about the cards
         # this is so the gymnasium API knows how to normalize the columns
-        self.card_observation_limits_high[:, :, self.card_column_indexer['available']] = 1
-        self.card_observation_limits_high[:, :, self.card_column_indexer['points']] = 5
-        self.card_observation_limits_high[:, :, self.card_column_indexer['color']] = len(self.colors)
-        self.card_observation_limits_high[:, :, self.color_indices] = 7
+        self.dealt_observation_limits_high[:, :, self.card_column_indexer['available']] = 1
+        self.dealt_observation_limits_high[:, :, self.card_column_indexer['points']] = 5
+        self.dealt_observation_limits_high[:, :, self.card_column_indexer['color']] = len(self.colors)
+        self.dealt_observation_limits_high[:, :, self.color_indices] = 7
 
         # fill in our numpy deck array with the csv data
         for tier in range(num_tiers):
@@ -254,10 +262,13 @@ class SplendorEnv(AECEnv):
         """
         Resets the environment to an initial state and returns the initial observation.
         """
-        super().reset(seed=seed)
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+        
+        # Resolve player count FIRST
+        if options and 'num_players' in options:
+            self.num_players = options['num_players']
         
         self.agents = self.possible_agents[:]
         self.rewards = {agent: 0 for agent in self.agents}
@@ -268,10 +279,6 @@ class SplendorEnv(AECEnv):
         
         # Reset the internal game state to the start of a Splendor game
         self.current_phase = 'main'
-        if options:
-            self.num_players = options['num_players']
-        else:
-            self.num_players = 4
         
         # initialize starting player index randomly
         self.starting_player = random.randint(0, self.num_players - 1)
@@ -412,7 +419,7 @@ class SplendorEnv(AECEnv):
                 # we can reuse logic to see which face up cards are available
                 s, e = self._action_indices_map["buy_face_up"]
                 invalid_action_indices = np.logical_not(np.logical_and(
-                    self.dealt[..., self.card_column_indexer['available']] == 1,
+                    (self.dealt[..., self.card_column_indexer['available']] == 1).flatten(),
                     self.get_purchasibility_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.dealt)
                 )).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
@@ -609,23 +616,25 @@ class SplendorEnv(AECEnv):
         # Generate the new observation state
         # Notice we use player_idx to structure the perspective
         observation = {
-            "phase": self.phases.index(self.current_phase),
-            "relative_player_seat": np.array([(player_idx + self.num_players - self.starting_player) % 4], dtype=np.uint8),
+            "observation": {
+                "phase": self.phases.index(self.current_phase),
+                "relative_player_seat": np.array([(player_idx + self.num_players - self.starting_player) % 4], dtype=np.uint8),
 
-            "tier_1_remaining": np.array([self.max_num_cards_at_tier[0]], dtype=np.uint8),
-            "tier_2_remaining": np.array([self.max_num_cards_at_tier[1]], dtype=np.uint8),
-            "tier_3_remaining": np.array([self.max_num_cards_at_tier[2]], dtype=np.uint8),
-            "nobles_remaining": np.array([self.num_nobles_available], dtype=np.uint8),
-            "tokens_remaining": self.tokens_remaining,
-            
-            "dealt": self.dealt,
-            "nobles": self.nobles,
-            
-            "points": self.points,
-            "reserved": self.reserved,
-            "discounts": self.discounts,
-            "num_cards_in_hand": self.num_cards_in_hand,
-            "tokens_in_hand": self.tokens_in_hand,
+                "tier_1_remaining": np.array([self.max_num_cards_at_tier[0]], dtype=np.uint8),
+                "tier_2_remaining": np.array([self.max_num_cards_at_tier[1]], dtype=np.uint8),
+                "tier_3_remaining": np.array([self.max_num_cards_at_tier[2]], dtype=np.uint8),
+                "nobles_remaining": np.array([self.num_nobles_available], dtype=np.uint8),
+                "tokens_remaining": self.tokens_remaining,
+                
+                "dealt": self.dealt,
+                "nobles": self.nobles,
+                
+                "points": self.points,
+                "reserved": self.reserved,
+                "discounts": self.discounts,
+                "num_cards_in_hand": self.num_cards_in_hand,
+                "tokens_in_hand": self.tokens_in_hand
+            },
             
             # The mask must reflect the current state. 
             # If it's not this agent's turn, the mask should ideally be all zeros.

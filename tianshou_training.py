@@ -51,6 +51,7 @@ class SplendorFeatureExtractor(nn.Module):
         flat_obs = torch.cat(flat_tensors, dim=1)
         return flat_obs, state
 
+
 class SplendorActionMaskNet(nn.Module):
     """
     The neural network that processes the flattened state and outputs action logits.
@@ -86,6 +87,32 @@ class SplendorActionMaskNet(nn.Module):
             
         return logits, state
 
+
+class SplendorCriticNet(nn.Module):
+    """
+    The neural network that processes the flattened state specifically for the Critic.
+    It outputs a hidden representation to be mapped to V(s) without applying any action masking.
+    """
+    def __init__(self, device="cpu"):
+        super().__init__()
+        self.device = device
+        self.extractor = SplendorFeatureExtractor(device)
+        
+        self.net = nn.Sequential(
+            nn.LazyLinear(256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+            # Notice there is no final linear layer here. 
+            # Tianshou's DiscreteCritic will automatically add the final Linear(256, 1) mapping.
+        )
+
+    def forward(self, obs, state=None, info={}):
+        flat_obs, state = self.extractor(obs, state, info)
+        hidden = self.net(flat_obs)
+        return hidden, state
+
+
 def train_splendor():
     # 1. Setup Environment Generators
     # Tianshou's PettingZooEnv wrapper natively handles the AEC cycle
@@ -105,10 +132,10 @@ def train_splendor():
     # 3. Initialize Actor-Critic Networks
     # We use the same base network structure for both, but different instances
     actor_net = SplendorActionMaskNet(action_shape, device=device).to(device)
-    critic_net = SplendorActionMaskNet(1, device=device).to(device)
+    critic_net = SplendorCriticNet(device=device).to(device)
     
-    actor = DiscreteActor(actor_net, action_shape, device=device).to(device)
-    critic = DiscreteCritic(critic_net, device=device).to(device)
+    actor = DiscreteActor(preprocess_net=actor_net, action_shape=action_shape).to(device)
+    critic = DiscreteCritic(preprocess_net=critic_net).to(device)
 
     # 4. Setup Optimizer and PPO Policy
     optim = torch.optim.Adam(set(actor.parameters()).union(critic.parameters()), lr=3e-4)
