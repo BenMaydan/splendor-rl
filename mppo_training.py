@@ -5,7 +5,7 @@ import os
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
-from stable_baselines3.common.callbacks import CallbackList, BaseCallback
+from stable_baselines3.common.callbacks import CallbackList, BaseCallback, CheckpointCallback
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.maskable.evaluation import evaluate_policy
 
@@ -110,7 +110,16 @@ def main():
     # 4. Wrap with ActionMasker so MaskablePPO can pull the valid actions
     env = ActionMasker(gym_env, mask_fn)
 
-    # 5. Set up Maskable Eval Callback
+    # 5. Set up Callbacks
+
+    # Saves the model every N steps
+    checkpoint_callback = CheckpointCallback(
+        save_freq=500_000,
+        save_path="./logs/checkpoints/",
+        name_prefix="splendor_ppo_mask"
+    )
+
+    # Set up Maskable Eval Callback
     # We create a separate identical environment for evaluation to prevent messing up training state
     eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
     eval_env = ActionMasker(Monitor(PettingZooToGymWrapper(eval_aec_env)), mask_fn)
@@ -128,7 +137,7 @@ def main():
     # Based on your SplendorEnv, it's the start of the 'pass' slice
     pass_action_idx = aec_env._action_indices_map["pass"][0] 
     pass_tracking_callback = TrackPassCallback(pass_action_index=pass_action_idx)
-    callback_list = CallbackList([eval_callback, pass_tracking_callback])
+    callback_list = CallbackList([eval_callback, pass_tracking_callback, checkpoint_callback])
 
     # 6. Initialize MaskablePPO
     # MultiInputPolicy is used because observation_space is a spaces.Dict
@@ -146,7 +155,7 @@ def main():
 
     # 7. Train the agent
     print("Starting training...")
-    model.learn(total_timesteps=1_000_000, callback=callback_list)
+    model.learn(total_timesteps=20_000_000, callback=callback_list)
 
     # 8. Save the final model
     model.save("splendor_ppo_mask")

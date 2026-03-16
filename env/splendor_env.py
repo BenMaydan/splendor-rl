@@ -197,6 +197,9 @@ class SplendorEnv(AECEnv):
         self.action_mapping = {}
         self.action_mask = np.ones((self.num_total_actions,), dtype=np.uint8)
         self._build_action_space()
+
+        # for global deadlocks - an early truncation mechanism if all players pass in a row
+        self.num_passes_in_a_row = None
     
     def initialize_nobles(self, seed=None):
         """
@@ -290,6 +293,7 @@ class SplendorEnv(AECEnv):
             self.tokens_remaining += 4
         self.tokens_remaining[self.gold_index] = 5
         self.tokens_in_hand = np.zeros((self.num_players, 1 + len(self.colors)), dtype=np.int8)
+        self.num_passes_in_a_row = 0
 
     def reset(self, seed=None, options=None):
         """
@@ -624,6 +628,12 @@ class SplendorEnv(AECEnv):
         action_type = action["type"]
         next_player = (self.current_player + 1) % self.num_players
 
+        # Update the pass counter based on the action taken
+        if action_type == "pass":
+            self.num_passes_in_a_row += 1
+        else:
+            self.num_passes_in_a_row = 0
+
         def buy_card(card) -> tuple[str, int]:
             # can't be none since we know the action is valid
             cost = self._token_cost(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], card)
@@ -834,7 +844,7 @@ class SplendorEnv(AECEnv):
         # ---------------------------------------------------------
         # 2. EVALUATE TERMINATION AFTER STATE IS UPDATED
         # ---------------------------------------------------------
-        is_truncated = self.truncation_condition()
+        is_truncated = self.truncation_condition() or (self.num_passes_in_a_row == self.num_players)
         is_terminated = self.termination_condition()
         
         if is_terminated or is_truncated:
