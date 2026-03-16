@@ -665,7 +665,7 @@ class SplendorEnv(AECEnv):
                 "tokens_in_hand": self.tokens_in_hand
             },
             
-            # The mask must reflect the current state. 
+            # The mask must reflect the current state.
             # If it's not this agent's turn, the mask should ideally be all zeros.
             "action_mask": self.action_mask if agent == self.agent_selection else np.zeros((self.num_total_actions,), dtype=np.uint8)
         }
@@ -676,15 +676,22 @@ class SplendorEnv(AECEnv):
         """
         Executes one time step within the environment based on the given action.
         """
-        # Check if the agent is dead (terminated/truncated)
+        # Handle Dead Steps Manually to avoid _agent_selector desync
         if self.terminations[self.agent_selection] or self.truncations[self.agent_selection]:
-            return self._was_dead_step(action)
+            agent = self.agent_selection
+            # _was_dead_step clears rewards and sets the agent as done
+            self._was_dead_step(action)
+            
+            # Manually advance to the next agent instead of relying on the broken _agent_selector
+            current_idx = self.possible_agents.index(agent)
+            next_idx = (current_idx + 1) % self.num_players
+            self.agent_selection = self.possible_agents[next_idx]
+            return
         
         # A guardrail to make sure AgileRL respects the action mask
         if self.action_mask[action] == 0:
             raise ValueError(
-                f"Agent {self.agent_selection} selected invalid action {action}, {self.action_mapping[action]}. "
-                f"Phase: {self.current_phase}. This means the RL algorithm is not properly applying the action mask!"
+                f"Agent {self.agent_selection} selected invalid action to {self.action_mapping[action]['desc']} in the {self.current_phase} phase."
             )
         
         agent = self.agent_selection
