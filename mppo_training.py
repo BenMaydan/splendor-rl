@@ -60,7 +60,7 @@ class PettingZooToGymWrapper(gym.Env):
     def action_masks(self) -> np.ndarray:
         # Crucial: Return the mask for whoever the AEC says is next
         obs, _, _, _, _ = self.env.last()
-        return obs["action_mask"]
+        return np.copy(obs["action_mask"])
 
 def mask_fn(env: gym.Env) -> np.ndarray:
     """Helper function for ActionMasker wrapper."""
