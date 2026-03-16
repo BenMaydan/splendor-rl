@@ -291,6 +291,7 @@ class SplendorEnv(AECEnv):
         self.initialize_misc()
 
         # re-initialize action mask
+        self.action_mask = np.ones((self.num_total_actions,), dtype=np.uint8)
         self._generate_action_mask()
         
         # Initialize PettingZoo's agent selector
@@ -483,7 +484,11 @@ class SplendorEnv(AECEnv):
         if gold_needed > tokens_in_hand[self.gold_index]:
             return None
         actual_gem_cost = np.maximum(0, np.minimum(raw_costs - discounts, tokens_in_hand[:len(self.colors)]))
-        return np.append(actual_gem_cost, gold_needed).astype(np.uint8)
+
+        result = np.empty(1 + len(self.colors), dtype=np.int8)
+        result[:len(self.colors)] = actual_gem_cost
+        result[self.gold_index] = gold_needed
+        return result
     
     def get_purchasibility_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.uint8]:
         """
@@ -497,28 +502,31 @@ class SplendorEnv(AECEnv):
         gold_needed = np.sum(deficit_per_color, axis=-1)
         return (tokens_in_hand[self.gold_index] >= gold_needed).flatten()
 
-    def _apply_action(self, current_player, action) -> tuple[int, str, int]:
+    def _apply_action(self, action) -> tuple[int, str, int]:
         """
         Applies the action to the current environment
         Returns:
             (mini_reward, next phase, next player index)
             Sometimes next player index does not change if there is a phase change
         """
+        # print(f"Action: {action}, player: {current_player}, phase: {self.current_phase}")
         action_type = action["type"]
-        next_player = (current_player + 1) % self.num_players
+        next_player = (self.current_player + 1) % self.num_players
 
         def buy_card(card) -> tuple[str, int]:
-            cost = self._token_cost(self.tokens_in_hand[current_player], self.discounts[current_player], card) # can't be none since we know the action is valid
-            self.tokens_in_hand[current_player] -= cost
-            self.tokens_remaining += cost
-            self.points[current_player] += card[self.card_column_indexer['points']]
-            self.num_cards_in_hand[current_player] += 1
-            self.discounts[current_player][card[self.card_column_indexer['color']]] += 1
+            # can't be none since we know the action is valid
+            cost = self._token_cost(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], card)
+            assert cost is not None and isinstance(cost, np.ndarray), f"Cost = {cost}"
+            self.tokens_in_hand[self.current_player] -= cost
+            self.tokens_remaining += cost.astype(self.tokens_remaining.dtype)
+            self.points[self.current_player] += card[self.card_column_indexer['points']]
+            self.num_cards_in_hand[self.current_player] += 1
+            self.discounts[self.current_player][card[self.card_column_indexer['color']]] += 1
 
             # Need to take into account awarding the noble of the players choice if he can get it
             available_nobles_cost = self.nobles[self.nobles[:, self.nobles_column_indexer['available']] == 1][..., self.nobles_color_indices]
-            if np.any(np.all(self.discounts[current_player] >= available_nobles_cost, axis=-1), axis=0):
-                return "pick_noble", current_player
+            if np.any(np.all(self.discounts[self.current_player] >= available_nobles_cost, axis=-1), axis=0):
+                return "pick_noble", self.current_player
             return self.current_phase, next_player
         
         def deal_new_card(tier, slot=None):
@@ -535,31 +543,31 @@ class SplendorEnv(AECEnv):
         match action_type:
             case "take_3_tokens":
                 token_indices = action["indices"]
-                self.tokens_in_hand[current_player, token_indices] += 1
+                self.tokens_in_hand[self.current_player, token_indices] += 1
                 self.tokens_remaining[token_indices] -= 1
-                if np.sum(self.tokens_in_hand[current_player]) > self.max_tokens_allowed:
-                    return (0, "discard", current_player)
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
+                    return (0, "discard", self.current_player)
                 return (0, self.current_phase, next_player)
             case "take_2_identical_tokens":
                 token_index = action["index"]
-                self.tokens_in_hand[current_player, token_index] += 2
+                self.tokens_in_hand[self.current_player, token_index] += 2
                 self.tokens_remaining[token_index] -= 2
-                if np.sum(self.tokens_in_hand[current_player]) > self.max_tokens_allowed:
-                    return (0, "discard", current_player)
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
+                    return (0, "discard", self.current_player)
                 return (0, self.current_phase, next_player)
             case "reserve_face_up":
                 tier, slot = action["tier"], action["slot"]
                 # put reserved card in players reserved pile
-                self.reserved[current_player, self.num_reserved[current_player]] = self.dealt[tier, slot]
-                self.num_reserved[current_player] += 1
+                self.reserved[self.current_player, self.num_reserved[self.current_player]] = self.dealt[tier, slot]
+                self.num_reserved[self.current_player] += 1
 
                 # take gold token for this player if there are tokens left
                 if self.tokens_remaining[self.gold_index] > 0:
-                    self.tokens_in_hand[current_player, self.gold_index] += 1
+                    self.tokens_in_hand[self.current_player, self.gold_index] += 1
                     self.tokens_remaining[self.gold_index] -= 1
                 
                 # make sure to move to discard if getting gold token brings you over the limit of allowed tokens
-                if np.sum(self.tokens_in_hand[current_player]) > self.max_tokens_allowed:
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     next_phase = 'discard'
                     next_player = self.current_player
                 else:
@@ -571,18 +579,18 @@ class SplendorEnv(AECEnv):
             case "reserve_face_down":
                 tier = action["tier"]
                 # put reserved card in players reserved pile
-                self.reserved[current_player, self.num_reserved[current_player]] = self.deck[tier, self.num_dealt_at_tier[tier]]
-                self.num_reserved[current_player] += 1
+                self.reserved[self.current_player, self.num_reserved[self.current_player]] = self.deck[tier, self.num_dealt_at_tier[tier]]
+                self.num_reserved[self.current_player] += 1
 
                 deal_new_card(tier)
 
                 # take gold token for this player if there are tokens left
                 if self.tokens_remaining[self.gold_index] > 0:
-                    self.tokens_in_hand[current_player, self.gold_index] += 1
+                    self.tokens_in_hand[self.current_player, self.gold_index] += 1
                     self.tokens_remaining[self.gold_index] -= 1
                 
                 # make sure to move to discard if getting gold token brings you over the limit of allowed tokens
-                if np.sum(self.tokens_in_hand[current_player]) > self.max_tokens_allowed:
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     next_phase = 'discard'
                     next_player = self.current_player
                 else:
@@ -591,32 +599,32 @@ class SplendorEnv(AECEnv):
                 return (0, next_phase, next_player)
             case "buy_face_up":
                 tier, slot = action["tier"], action["slot"]
-                next_phase, player = buy_card(self.dealt[tier][slot])
+                next_phase, player = buy_card(self.dealt[tier, slot])
                 deal_new_card(tier, slot)
                 return (self.mini_rewards['buy_card'], next_phase, player)
             case "buy_reserved":
                 index = action["index"]
-                next_phase, player = buy_card(self.reserved[current_player, index])
-                self.reserved[current_player, index, self.card_column_indexer['available']] = 0
-                self.num_reserved[current_player] -= 1
+                next_phase, player = buy_card(self.reserved[self.current_player, index])
+                self.reserved[self.current_player, index, self.card_column_indexer['available']] = 0
+                self.num_reserved[self.current_player] -= 1
                 # we shift over the remaining reserved cards
-                new_available_reserved_cards = self.reserved[current_player, :, self.card_column_indexer['available']] == 1
-                self.reserved[current_player, :self.num_reserved[current_player]] = self.reserved[current_player, new_available_reserved_cards]
-                self.reserved[current_player, self.num_reserved[current_player]:, :] = 0
+                new_available_reserved_cards = self.reserved[self.current_player, :, self.card_column_indexer['available']] == 1
+                self.reserved[self.current_player, :self.num_reserved[self.current_player]] = self.reserved[self.current_player, new_available_reserved_cards]
+                self.reserved[self.current_player, self.num_reserved[self.current_player]:, :] = 0
                 return (self.mini_rewards['buy_card'], next_phase, player)
             case "pick_noble":
-                assert self.current_phase == "pick_noble", "Pick noble action taken outside of pick noble phase!"
+                assert self.current_phase == "pick_noble", f"Pick noble action taken in {self.current_phase} phase!"
                 index = action["index"]
-                self.points[current_player] += 3
+                self.points[self.current_player] += 3
                 self.nobles[index, self.nobles_column_indexer['available']] = 0
                 return (self.mini_rewards['get_noble'], "main", next_player)
             case "discard_token":
-                assert self.current_phase == "discard", "Discard action taken outside of discard phase!"
+                assert self.current_phase == "discard", f"Discard action taken in {self.current_phase} phase!"
                 index = action["index"]
                 self.tokens_remaining[index] += 1
-                self.tokens_in_hand[current_player][index] -= 1
-                if np.sum(self.tokens_in_hand[current_player]) > self.max_tokens_allowed:
-                    return (0, "discard", current_player)
+                self.tokens_in_hand[self.current_player][index] -= 1
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
+                    return (0, "discard", self.current_player)
                 return (0, "main", next_player)
             case _:
                 raise gym.error.InvalidAction(f"Action {action} is ill-defined!")
@@ -672,6 +680,13 @@ class SplendorEnv(AECEnv):
         if self.terminations[self.agent_selection] or self.truncations[self.agent_selection]:
             return self._was_dead_step(action)
         
+        # A guardrail to make sure AgileRL respects the action mask
+        if self.action_mask[action] == 0:
+            raise ValueError(
+                f"Agent {self.agent_selection} selected invalid action {action}, {self.action_mapping[action]}. "
+                f"Phase: {self.current_phase}. This means the RL algorithm is not properly applying the action mask!"
+            )
+        
         agent = self.agent_selection
         self.current_player = int(agent.split('_')[1])
         
@@ -723,7 +738,7 @@ class SplendorEnv(AECEnv):
         # We let the agent apply its action and update the current player and phase appropriately
         if self.current_phase == self.phases[0]:
             self.num_turns += 1
-        mini_reward, next_phase, next_player = self._apply_action(self.current_player, action_dict)
+        mini_reward, next_phase, next_player = self._apply_action(action_dict)
         assert next_phase in self.phases
         assert next_player < self.num_players
         self.current_phase = next_phase
