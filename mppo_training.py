@@ -5,6 +5,7 @@ import os
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
+from stable_baselines3.common.callbacks import CallbackList, BaseCallback
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.maskable.evaluation import evaluate_policy
 
@@ -31,8 +32,12 @@ class PettingZooToGymWrapper(gym.Env):
     def _get_obs_and_mask(self):
         """Helper to get current agent's observation and mask."""
         obs, reward, terminated, truncated, info = self.env.last()
-        flat_obs = {k: v for k, v in obs["observation"].items()}
-        flat_obs["action_mask"] = obs["action_mask"]
+        
+        # Use np.copy() to ensure we aren't passing references to 
+        # internal environment arrays that will change next step.
+        flat_obs = {k: np.copy(v) for k, v in obs["observation"].items()}
+        flat_obs["action_mask"] = np.copy(obs["action_mask"])
+        
         return flat_obs, float(reward), terminated, truncated, info
 
     def reset(self, seed=None, options=None):
@@ -61,6 +66,27 @@ class PettingZooToGymWrapper(gym.Env):
         # Crucial: Return the mask for whoever the AEC says is next
         obs, _, _, _, _ = self.env.last()
         return np.copy(obs["action_mask"])
+
+class TrackPassCallback(BaseCallback):
+    def __init__(self, pass_action_index, verbose=0):
+        super().__init__(verbose)
+        self.pass_action_index = pass_action_index
+        self.pass_count = 0
+
+    def _on_step(self) -> bool:
+        # Extract the action taken in the last step
+        # actions is a numpy array because of VecEnv
+        actions = self.locals.get("actions")
+        
+        if actions is not None:
+            # Increment count for every instance of a 'Pass' action in the batch
+            self.pass_count += np.sum(actions == self.pass_action_index)
+
+        # Log the cumulative count and the current step's status to TensorBoard
+        # We log every step, but TB will smooth/subsample it
+        self.logger.record("stats/cumulative_pass_actions", self.pass_count)
+        
+        return True
 
 def mask_fn(env: gym.Env) -> np.ndarray:
     """Helper function for ActionMasker wrapper."""
@@ -98,6 +124,12 @@ def main():
         render=False
     )
 
+    # Get the index of the Pass action from the environment's internal mapping
+    # Based on your SplendorEnv, it's the start of the 'pass' slice
+    pass_action_idx = aec_env._action_indices_map["pass"][0] 
+    pass_tracking_callback = TrackPassCallback(pass_action_index=pass_action_idx)
+    callback_list = CallbackList([eval_callback, pass_tracking_callback])
+
     # 6. Initialize MaskablePPO
     # MultiInputPolicy is used because observation_space is a spaces.Dict
     print("Initializing MaskablePPO...")
@@ -114,7 +146,7 @@ def main():
 
     # 7. Train the agent
     print("Starting training...")
-    model.learn(total_timesteps=1_000_000, callback=eval_callback)
+    model.learn(total_timesteps=1_000_000, callback=callback_list)
 
     # 8. Save the final model
     model.save("splendor_ppo_mask")

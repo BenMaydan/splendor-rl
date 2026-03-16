@@ -49,7 +49,20 @@ class SplendorEnv(AECEnv):
         self._action_pick_noble = self.max_num_players + 1
         self._action_discard = 1 + len(self.colors) # if you have too many tokens - includes ability to discard a gold even though it's objectively never the right move
         self._action_pass = 1
-        self.num_total_actions = self._action_take_3_diff_tokens + self._action_take_2_diff_tokens + self._action_take_1_token + self._action_take_2_identical + self._action_reserve_face_up + self._action_reserve_face_down + self._action_buy_face_up + self._action_buy_reserved + self._action_pick_noble + self._action_discard
+        
+        self.num_total_actions = (
+            self._action_take_3_diff_tokens + 
+            self._action_take_2_diff_tokens + 
+            self._action_take_1_token + 
+            self._action_take_2_identical + 
+            self._action_reserve_face_up + 
+            self._action_reserve_face_down + 
+            self._action_buy_face_up + 
+            self._action_buy_reserved + 
+            self._action_pick_noble + 
+            self._action_discard + 
+            self._action_pass
+        )
 
         # here we precompute some things to make it easier to create the action mask very quickly
         all_combs_take_three_tokens = list(itertools.combinations(np.arange(len(self.colors)), 3))
@@ -79,7 +92,8 @@ class SplendorEnv(AECEnv):
         self._action_indices[7] = self._action_indices[6] + self._action_buy_face_up
         self._action_indices[8] = self._action_indices[7] + self._action_buy_reserved
         self._action_indices[9] = self._action_indices[8] + self._action_pick_noble
-        self._action_indices[10] = self.num_total_actions
+        self._action_indices[10] = self._action_indices[9] + self._action_discard
+        self._action_indices[11] = self._action_indices[10] + self._action_pass
         self._action_indices_map = {
             "take_3_diff_tokens": [self._action_indices[0], self._action_indices[1]],
             "take_2_diff_tokens": [self._action_indices[1], self._action_indices[2]],
@@ -516,17 +530,9 @@ class SplendorEnv(AECEnv):
                     self.get_purchasibility_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.reserved[self.current_player])
                 )).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
-
-
-                # Mask out the pass action by default
-                s, e = self._action_indices_map["pass"]
-                self.action_mask[s:e] = 0
-                
-                # If absolutely no actions are available, unmask the pass action
-                if np.sum(self.action_mask) == 0:
-                    self.action_mask[s:e] = 1
             
             case "pick_noble":
+                assert np.any(self.nobles[..., self.nobles_column_indexer['available']] == 1)
                 self.action_mask[:] = 0
                 # only allow actions for correct nobles you can pick
                 # most of the time there will only be one allowable action
@@ -539,6 +545,7 @@ class SplendorEnv(AECEnv):
                 self.action_mask[s:e][valid_action_indices] = 1
 
             case "discard":
+                assert np.sum(self.tokens_in_hand[self.current_player]) > 0
                 self.action_mask[:] = 0
                 # only allow actions for tokens you are able to discard
                 s, e = self._action_indices_map["discard"]
@@ -546,8 +553,34 @@ class SplendorEnv(AECEnv):
                 self.action_mask[s:e][valid_action_indices] = 1
         
 
+        # ---------------------------------------------------------
+        # GLOBAL FALLBACK: Evaluate only after ALL masking is finished
+        # This only happens because it is possible to be in an absolute deadlock, just really unlikely
+        # ---------------------------------------------------------
+        # 1. Mask out the pass action by default just to be safe
+        s_pass, e_pass = self._action_indices_map["pass"]
+        self.action_mask[s_pass:e_pass] = 0
+        
+        # 2. If absolutely no actions survived the phase logic, unlock pass
+        if np.sum(self.action_mask) == 0:
+            self.action_mask[s_pass:e_pass] = 1
+
+
         # A guardrail to ensure there is always one valid action - this should ALWAYS pass
-        assert np.sum(self.action_mask) > 0
+        try:
+            assert np.sum(self.action_mask) > 0
+        except AssertionError:
+            print(f"DEADLOCK DETECTED!")
+            print(f"Phase: {self.current_phase}")
+            print(f"Player: {self.current_player}")
+            print(f"Bank: {self.tokens_remaining}")
+            print(f"Nobles: {self.nobles}")
+            print(f"Reserved: {self.reserved}")
+            print(f"Hand: {self.tokens_in_hand[self.current_player]}")
+            print(f"All Tokens: {self.tokens_in_hand}, Sum: {np.sum(self.tokens_in_hand, axis=0)}")
+            print(f"Dealt: {self.dealt}")
+            print(f"Num Dealt: {self.num_dealt_at_tier}")
+            raise
 
     def _token_cost(self, tokens_in_hand, discounts, card) -> None | NDArray[np.uint8]:
         """
