@@ -38,7 +38,9 @@ class SplendorEnv(AECEnv):
         self.max_num_of_color = None
 
         # types of actions
-        self._action_take_3_tokens = math.comb(len(self.colors), self.num_tiers)
+        self._action_take_3_diff_tokens = math.comb(len(self.colors), 3)
+        self._action_take_2_diff_tokens = math.comb(len(self.colors), 2)
+        self._action_take_1_token = math.comb(len(self.colors), 1)
         self._action_take_2_identical = len(self.colors)
         self._action_reserve_face_up = self.num_tiers * 4
         self._action_reserve_face_down = self.num_tiers
@@ -46,34 +48,50 @@ class SplendorEnv(AECEnv):
         self._action_buy_reserved = 3
         self._action_pick_noble = self.max_num_players + 1
         self._action_discard = 1 + len(self.colors) # if you have too many tokens - includes ability to discard a gold even though it's objectively never the right move
-        self.num_total_actions = self._action_take_3_tokens + self._action_take_2_identical + self._action_reserve_face_up + self._action_reserve_face_down + self._action_buy_face_up + self._action_buy_reserved + self._action_pick_noble + self._action_discard
+        self._action_pass = 1
+        self.num_total_actions = self._action_take_3_diff_tokens + self._action_take_2_diff_tokens + self._action_take_1_token + self._action_take_2_identical + self._action_reserve_face_up + self._action_reserve_face_down + self._action_buy_face_up + self._action_buy_reserved + self._action_pick_noble + self._action_discard
 
         # here we precompute some things to make it easier to create the action mask very quickly
         all_combs_take_three_tokens = list(itertools.combinations(np.arange(len(self.colors)), 3))
         self._precomputed_combs_take_three_tokens = np.zeros((len(all_combs_take_three_tokens), 3), dtype=np.uint8)
         for i, comb in enumerate(all_combs_take_three_tokens):
             self._precomputed_combs_take_three_tokens[i] = comb
+        
+        all_combs_take_two_tokens = list(itertools.combinations(np.arange(len(self.colors)), 2))
+        self._precomputed_combs_take_two_tokens = np.zeros((len(all_combs_take_two_tokens), 2), dtype=np.uint8)
+        for i, comb in enumerate(all_combs_take_two_tokens):
+            self._precomputed_combs_take_two_tokens[i] = comb
+        
+        all_combs_take_one_token = list(itertools.combinations(np.arange(len(self.colors)), 1))
+        self._precomputed_combs_take_one_token = np.zeros((len(all_combs_take_one_token), 1), dtype=np.uint8)
+        for i, comb in enumerate(all_combs_take_one_token):
+            self._precomputed_combs_take_one_token[i] = comb
 
         # we want to precompute starting indices of the action mask for a given action type (for quick masking)
         # the ending index of the action type is the action_indices[action_type_index + 1]
-        self._action_indices = np.zeros((9,), dtype=np.uint8)
-        self._action_indices[1] = self._action_take_3_tokens
-        self._action_indices[2] = self._action_indices[1] + self._action_take_2_identical
-        self._action_indices[3] = self._action_indices[2] + self._action_reserve_face_up
-        self._action_indices[4] = self._action_indices[3] + self._action_reserve_face_down
-        self._action_indices[5] = self._action_indices[4] + self._action_buy_face_up
-        self._action_indices[6] = self._action_indices[5] + self._action_buy_reserved
-        self._action_indices[7] = self._action_indices[6] + self._action_pick_noble
-        self._action_indices[8] = self.num_total_actions
+        self._action_indices = np.zeros((12,), dtype=np.uint8)
+        self._action_indices[1] = self._action_take_3_diff_tokens
+        self._action_indices[2] = self._action_indices[1] + self._action_take_2_diff_tokens
+        self._action_indices[3] = self._action_indices[2] + self._action_take_1_token
+        self._action_indices[4] = self._action_indices[3] + self._action_take_2_identical
+        self._action_indices[5] = self._action_indices[4] + self._action_reserve_face_up
+        self._action_indices[6] = self._action_indices[5] + self._action_reserve_face_down
+        self._action_indices[7] = self._action_indices[6] + self._action_buy_face_up
+        self._action_indices[8] = self._action_indices[7] + self._action_buy_reserved
+        self._action_indices[9] = self._action_indices[8] + self._action_pick_noble
+        self._action_indices[10] = self.num_total_actions
         self._action_indices_map = {
-            "take_3_tokens": [self._action_indices[0], self._action_indices[1]],
-            "take_2_tokens": [self._action_indices[1], self._action_indices[2]],
-            "reserve_face_up": [self._action_indices[2], self._action_indices[3]],
-            "reserve_face_down": [self._action_indices[3], self._action_indices[4]],
-            "buy_face_up": [self._action_indices[4], self._action_indices[5]],
-            "buy_reserved": [self._action_indices[5], self._action_indices[6]],
-            "pick_noble": [self._action_indices[6], self._action_indices[7]],
-            "discard": [self._action_indices[7], self._action_indices[8]],
+            "take_3_diff_tokens": [self._action_indices[0], self._action_indices[1]],
+            "take_2_diff_tokens": [self._action_indices[1], self._action_indices[2]],
+            "take_1_token": [self._action_indices[2], self._action_indices[3]],
+            "take_2_tokens": [self._action_indices[3], self._action_indices[4]],
+            "reserve_face_up": [self._action_indices[4], self._action_indices[5]],
+            "reserve_face_down": [self._action_indices[5], self._action_indices[6]],
+            "buy_face_up": [self._action_indices[6], self._action_indices[7]],
+            "buy_reserved": [self._action_indices[7], self._action_indices[8]],
+            "pick_noble": [self._action_indices[8], self._action_indices[9]],
+            "discard": [self._action_indices[9], self._action_indices[10]],
+            "pass": [self._action_indices[10], self._action_indices[11]],
         }
 
         # Initializing internal game state variables
@@ -307,17 +325,37 @@ class SplendorEnv(AECEnv):
         """
         action_idx = 0
 
-        # Action 1: taking 3 tokens
+        # Action 1: taking 3 diff tokens
         for comb in itertools.combinations(np.arange(len(self.colors)), 3):
             desc = ", ".join([f"1 {self.colors[comb[i]]}" for i in range(len(comb))])
             self.action_mapping[action_idx] = {
-                "type": "take_3_tokens",
+                "type": "take_3_diff_tokens",
                 "indices": list(comb),
                 "desc": f"Take Gems ({desc})"
             }
             action_idx += 1
         
-        # Action 2: taking 2 identical tokens
+        # Action 2: taking 2 diff tokens
+        for comb in itertools.combinations(np.arange(len(self.colors)), 2):
+            desc = ", ".join([f"1 {self.colors[comb[i]]}" for i in range(len(comb))])
+            self.action_mapping[action_idx] = {
+                "type": "take_2_diff_tokens",
+                "indices": list(comb),
+                "desc": f"Take Gems ({desc})"
+            }
+            action_idx += 1
+        
+        # Action 3: taking 1 token
+        for comb in itertools.combinations(np.arange(len(self.colors)), 1):
+            desc = ", ".join([f"1 {self.colors[comb[i]]}" for i in range(len(comb))])
+            self.action_mapping[action_idx] = {
+                "type": "take_1_token",
+                "indices": list(comb),
+                "desc": f"Take Gems ({desc})"
+            }
+            action_idx += 1
+        
+        # Action 4: taking 2 identical tokens
         for color_index in range(len(self.colors)):
             self.action_mapping[action_idx] = {
                 "type": "take_2_identical_tokens",
@@ -326,7 +364,7 @@ class SplendorEnv(AECEnv):
             }
             action_idx += 1
         
-        # # Action 3: Reserving a face up card
+        # # Action 5: Reserving a face up card
         # 3 tiers, 4 cards each = 12 actions
         for tier in range(self.num_tiers):
             for slot in range(4):
@@ -338,7 +376,7 @@ class SplendorEnv(AECEnv):
                 }
                 action_idx += 1
         
-        # # Action 4: Reserving a face down card
+        # # Action 6: Reserving a face down card
         # 3 tiers = 3 actions
         for tier in range(self.num_tiers):
             self.action_mapping[action_idx] = {
@@ -348,7 +386,7 @@ class SplendorEnv(AECEnv):
             }
             action_idx += 1
                 
-        # Action 5: Buying Face-Up Cards
+        # Action 7: Buying Face-Up Cards
         for tier in range(self.num_tiers):
             for slot in range(4):
                 self.action_mapping[action_idx] = {
@@ -359,7 +397,7 @@ class SplendorEnv(AECEnv):
                 }
                 action_idx += 1
         
-        # Action 6: Buying Reserved Cards
+        # Action 8: Buying Reserved Cards
         # Can reserve at most 3 cards
         desc_number = ["1st", "2nd", "3rd", "4th", "5th"]
         for index in range(3):
@@ -370,7 +408,7 @@ class SplendorEnv(AECEnv):
             }
             action_idx += 1
         
-        # Action 7: Pick a noble if you can
+        # Action 9: Pick a noble if you can
         for index in range(self.num_nobles_available):
             self.action_mapping[action_idx] = {
                 "type": "pick_noble",
@@ -379,7 +417,7 @@ class SplendorEnv(AECEnv):
             }
             action_idx += 1
 
-        # Action 8: Discard tokens (if you have too many)
+        # Action 10: Discard tokens (if you have too many)
         desc_colors = self.colors.copy()
         desc_colors.insert(self.gold_index, "Gold")
         for token_type in range(1 + len(self.colors)):
@@ -389,6 +427,12 @@ class SplendorEnv(AECEnv):
                 "desc": f"Discard {desc_colors[token_type]} Gem"
             }
             action_idx += 1
+        
+        # Action 11: Pass if you can't do anything
+        self.action_mapping[action_idx] = {
+            "type": "pass",
+            "desc": f"Pass (No Legal Moves)"
+        }
     
     def _generate_action_mask(self) -> None:
         """
@@ -398,6 +442,11 @@ class SplendorEnv(AECEnv):
             case "main":
                 self.action_mask[:] = 1
 
+                # mask out taking 2 diff and 1 token since that is a special case of there not being enough 3 diff tokens
+                s, e = self._action_indices_map["take_2_diff_tokens"]
+                self.action_mask[s:e] = 0
+                s, e = self._action_indices_map["take_1_token"]
+                self.action_mask[s:e] = 0
                 # mask out picking noble and discarding since that is not allowed in the main phase
                 s, e = self._action_indices_map["pick_noble"]
                 self.action_mask[s:e] = 0
@@ -406,11 +455,27 @@ class SplendorEnv(AECEnv):
 
                 num_reserved = self.num_reserved[self.current_player]
 
-                # mask out invalid actions of taking three tokens using advanced numpy magic to avoid python for loops
-                s, e = self._action_indices_map["take_3_tokens"]
+                # mask out invalid actions of taking three tokens
+                s, e = self._action_indices_map["take_3_diff_tokens"]
                 invalid_action_indices = np.any(self.tokens_remaining[self._precomputed_combs_take_three_tokens] == 0, axis=1)
                 self.action_mask[s:e][invalid_action_indices] = 0
 
+                # means it is not possible to take three different tokens, so you take two different tokens
+                if np.sum(self.action_mask[s:e]) == 0:
+                    s, e = self._action_indices_map["take_2_diff_tokens"]
+                    self.action_mask[s:e] = 1
+                    invalid_action_indices = np.any(self.tokens_remaining[self._precomputed_combs_take_two_tokens] == 0, axis=1)
+                    self.action_mask[s:e][invalid_action_indices] = 0
+
+                    # means it is not possible to take three different tokens, so you take one token
+                    if np.sum(self.action_mask[s:e]) == 0:
+                        s, e = self._action_indices_map["take_1_token"]
+                        self.action_mask[s:e] = 1
+                        invalid_action_indices = np.any(self.tokens_remaining[self._precomputed_combs_take_one_token] == 0, axis=1)
+                        self.action_mask[s:e][invalid_action_indices] = 0
+
+
+                # MOVING ON ->
                 # mask out invalid actions of taking two identical tokens
                 s, e = self._action_indices_map["take_2_tokens"]
                 invalid_action_indices = self.tokens_remaining[:len(self.colors)] < 4
@@ -451,6 +516,15 @@ class SplendorEnv(AECEnv):
                     self.get_purchasibility_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.reserved[self.current_player])
                 )).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
+
+
+                # Mask out the pass action by default
+                s, e = self._action_indices_map["pass"]
+                self.action_mask[s:e] = 0
+                
+                # If absolutely no actions are available, unmask the pass action
+                if np.sum(self.action_mask) == 0:
+                    self.action_mask[s:e] = 1
             
             case "pick_noble":
                 self.action_mask[:] = 0
@@ -470,6 +544,10 @@ class SplendorEnv(AECEnv):
                 s, e = self._action_indices_map["discard"]
                 valid_action_indices = (self.tokens_in_hand[self.current_player] > 0)
                 self.action_mask[s:e][valid_action_indices] = 1
+        
+
+        # A guardrail to ensure there is always one valid action - this should ALWAYS pass
+        assert np.sum(self.action_mask) > 0
 
     def _token_cost(self, tokens_in_hand, discounts, card) -> None | NDArray[np.uint8]:
         """
@@ -541,7 +619,7 @@ class SplendorEnv(AECEnv):
             self.num_dealt_at_tier[tier] += 1
 
         match action_type:
-            case "take_3_tokens":
+            case "take_3_diff_tokens" | "take_2_diff_tokens" | "take_1_token":
                 token_indices = action["indices"]
                 self.tokens_in_hand[self.current_player, token_indices] += 1
                 self.tokens_remaining[token_indices] -= 1
@@ -626,6 +704,8 @@ class SplendorEnv(AECEnv):
                 if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     return (0, "discard", self.current_player)
                 return (0, "main", next_player)
+            case "pass":
+                return (0, self.current_phase, next_player)
             case _:
                 raise gym.error.InvalidAction(f"Action {action} is ill-defined!")
 
@@ -696,18 +776,31 @@ class SplendorEnv(AECEnv):
         
         agent = self.agent_selection
         self.current_player = int(agent.split('_')[1])
-        
-        # Clear step-wise rewards
-        self.rewards = {a: 0 for a in self.agents}
-        
-        # get important info about the action for execution
         action_dict = self.action_mapping[action]
 
         # Clear step-wise rewards
         self.rewards = {a: 0 for a in self.agents}
 
-        # Determine if the game has ended naturally (e.g., someone hit 15 points) and everyone has finished their last turn
-        # I think this logic also needs to happen if the game has been truncated due to lack of progress
+        # ---------------------------------------------------------
+        # 1. APPLY THE ACTION FIRST
+        # ---------------------------------------------------------
+        if self.current_phase == self.phases[0]:
+            self.num_turns += 1
+            
+        mini_reward, next_phase, next_player = self._apply_action(action_dict)
+        
+        # Update internal state tracking
+        self.current_phase = next_phase
+        self.current_player = next_player
+        self._generate_action_mask()
+        
+        # Assign mini rewards
+        self.rewards[agent] += mini_reward
+        self.rewards[agent] += self.discourage_stalling
+
+        # ---------------------------------------------------------
+        # 2. EVALUATE TERMINATION AFTER STATE IS UPDATED
+        # ---------------------------------------------------------
         is_truncated = self.truncation_condition()
         is_terminated = self.termination_condition()
         
@@ -716,7 +809,7 @@ class SplendorEnv(AECEnv):
             max_points = np.max(self.points)
             candidates = np.where(self.points == max_points)[0]
             
-            # 3. Apply the tie-breaker if necessary
+            # Apply the tie-breaker if necessary
             if len(candidates) > 1:
                 # Get the card counts only for the tied players
                 candidate_cards = self.num_cards_in_hand[candidates]
@@ -731,44 +824,33 @@ class SplendorEnv(AECEnv):
             mask = np.ones(self.points.shape, dtype=bool)
             mask[winner] = False
             sum_loser_points = np.sum(self.points[mask])
+            
             for i in range(self.num_players):
                 if i == winner:
                     self.rewards[f"player_{i}"] += self.win_points + (self.num_players - 1) * winner_points - sum_loser_points
                 else:
                     self.rewards[f"player_{i}"] += -self.lose_points - (winner_points - self.points[i])
             
-            # we terminate/truncate all the agents so the environment can be reset to play another game
+            # Terminate all agents
             for a in self.agents:
                 self.terminations[a] = is_terminated
                 self.truncations[a] = is_truncated
-        
-        # We let the agent apply its action and update the current player and phase appropriately
-        if self.current_phase == self.phases[0]:
-            self.num_turns += 1
-        mini_reward, next_phase, next_player = self._apply_action(action_dict)
-        assert next_phase in self.phases
-        assert next_player < self.num_players
-        self.current_phase = next_phase
-        self.current_player = next_player
-        self._generate_action_mask()
-        
-        # Assign mini rewards to encourage learning something at the beginning of training
-        self.rewards[agent] += mini_reward
-        self.rewards[agent] += self.discourage_stalling
-        
-        # Advance to the next agent
-        if not (is_terminated or is_truncated):
+                
+            # DO NOT update self.agent_selection here.
+            # Leaving it on the current agent triggers the dead step logic on the next call.
+        else:
+            # ---------------------------------------------------------
+            # 3. ADVANCE TO NEXT PLAYER ONLY IF GAME CONTINUES
+            # ---------------------------------------------------------
             self.agent_selection = f"player_{next_player}"
              
         self._accumulate_rewards()
         
-        # TODO: maybe we don't want this?
-        info = {
+        self.infos[agent] = {
             'phase': self.current_phase,
             'turn': self.current_player,
             'action': action_dict
         }
-        self.infos[agent] = info
 
     def render(self):
         """
