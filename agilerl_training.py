@@ -2,7 +2,7 @@ import os
 import time
 import numpy as np
 import torch
-from gymnasium.spaces import utils
+from gymnasium.spaces import Dict, utils
 from torch.utils.tensorboard import SummaryWriter
 
 # Import AgileRL components
@@ -23,20 +23,35 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
     env = SplendorEnv(num_players=4)
     env.reset()
 
-    # 2. Extract and Flatten Spaces for AgileRL
+    # 2. Extract and create a hybrid space for AgileRL
     dummy_agent = env.possible_agents[0]
-    base_obs_space = env.observation_space(dummy_agent)["observation"]
-    flat_obs_space = utils.flatten_space(base_obs_space)
+    full_space = env.observation_space(dummy_agent)
+    
+    # Isolate the inner dictionary and flatten it
+    base_obs_space = full_space["observation"]
+    flat_inner_obs_space = utils.flatten_space(base_obs_space)
+    
+    # Construct the top-level Dict space AgileRL requires
+    agilerl_obs_space = Dict({
+        "observation": flat_inner_obs_space,
+        "action_mask": full_space["action_mask"]
+    })
     action_space = env.action_space(dummy_agent)
 
-    # 3. Initialize AgileRL PPO Agent (Acting as a shared brain for all players)
+    # 3. Initialize AgileRL PPO Agent
     ppo_agent = PPO(
-        observation_space=flat_obs_space,
+        observation_space=agilerl_obs_space,
         action_space=action_space,
         device=device,
         net_config={
-            "encoder_config": {"hidden_size": [256, 256, 256]}, 
-            "head_config": {"hidden_size": [256]} 
+            "encoder_config": {
+                "latent_dim": 256, # The output dimension of the multi-input encoder
+                "max_latent_dim": 256,
+                "mlp_config": {"hidden_size": [256, 256]} # The hidden layers for your vector data
+            }, 
+            "head_config": {
+                "hidden_size": [256] 
+            } 
         },
         batch_size=256,
         ent_coef=0.02,
@@ -45,12 +60,12 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
 
     update_steps = 2048
 
-    # Initialize AgileRL's native RolloutBuffer with Gym spaces
+    # Initialize RolloutBuffer with the hybrid space
     buffer = RolloutBuffer(
         capacity=update_steps,
-        observation_space=flat_obs_space,
+        observation_space=agilerl_obs_space,
         action_space=action_space,
-        num_envs=1,  # Since you process AEC steps sequentially
+        num_envs=1,
         device=device
     )
     
@@ -79,17 +94,25 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 observation, reward, termination, truncation, info = env.last()
                 done = int(termination or truncation)
                 
-                raw_obs = observation["observation"]
+                # Extract the nested structures
+                raw_inner_obs = observation["observation"]
                 mask = observation["action_mask"]
-                flat_state = utils.flatten(base_obs_space, raw_obs)
+                
+                # Flatten ONLY the inner dictionary
+                flat_inner_state = utils.flatten(base_obs_space, raw_inner_obs)
+                
+                # Construct the batched dictionary without nesting
+                batched_state = {
+                    "observation": np.expand_dims(flat_inner_state, axis=0),
+                    "action_mask": np.expand_dims(mask, axis=0).astype(bool)
+                }
                 
                 # Complete transition and add to AgileRL buffer
                 if last_step_data[agent_id] is not None:
-                    prev_s, prev_a, prev_lp, prev_v = last_step_data[agent_id]
+                    prev_batched_s, prev_a, prev_lp, prev_v = last_step_data[agent_id]
                     
-                    # AgileRL's buffer .add() method expects specific named kwargs and batched arrays
                     buffer.add(
-                        obs=np.expand_dims(prev_s, axis=0),
+                        obs=prev_batched_s,
                         action=np.array([prev_a]),
                         reward=np.array([reward]),
                         done=np.array([done]),
@@ -101,12 +124,12 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 if done:
                     action = None
                 else:
-                    action, log_prob, _, value = ppo_agent.get_action(flat_state, action_mask=mask)
+                    action, log_prob, _, value = ppo_agent.get_action(batched_state, action_mask=batched_state["action_mask"])
                     
                     if isinstance(action, np.ndarray):
                         action = int(action[0])
                         
-                    last_step_data[agent_id] = (flat_state, action, log_prob, value)
+                    last_step_data[agent_id] = (batched_state, action, log_prob, value)
                     total_steps += 1
                     
                 env.step(action)
@@ -125,8 +148,8 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                         exp_dict['rewards'],
                         exp_dict['dones'],
                         exp_dict['values'],
-                        np.expand_dims(flat_state, axis=0), # Use current state as next_state
-                        np.array([done])                    # Use current done as next_done
+                        batched_state,            # Use current batched dict as next_state
+                        np.array([done])          # Use current done as next_done
                     )
                     
                     # 3. Pass the tuple to learn()
