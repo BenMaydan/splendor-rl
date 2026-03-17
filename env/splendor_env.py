@@ -153,12 +153,13 @@ class SplendorEnv(AECEnv):
         self.truncation_condition = lambda: (self.num_turns >= maximum_total_turns)
 
         self.mini_rewards = {
-            'buy_card': 0.01,
-            'get_noble': 0.05,
+            'buy_card': 1.0,
+            'get_noble': 5.0,
         }
         self.lose_points = 100
         self.win_points = (self.num_players - 1) * self.lose_points
-        self.discourage_stalling = -0.01
+        self.discourage_stalling = -0.03
+        self.deadlock_tax = -50
 
         self.initialize_nobles()
         self.initialize_deck()
@@ -844,7 +845,8 @@ class SplendorEnv(AECEnv):
         # ---------------------------------------------------------
         # 2. EVALUATE TERMINATION AFTER STATE IS UPDATED
         # ---------------------------------------------------------
-        is_truncated = self.truncation_condition() or (self.num_passes_in_a_row == self.num_players)
+        is_deadlock = (self.num_passes_in_a_row == self.num_players)
+        is_truncated = is_deadlock or self.truncation_condition()
         is_terminated = self.termination_condition()
         
         if is_terminated or is_truncated:
@@ -870,9 +872,15 @@ class SplendorEnv(AECEnv):
             
             for i in range(self.num_players):
                 if i == winner:
-                    self.rewards[f"player_{i}"] += self.win_points + (self.num_players - 1) * winner_points - sum_loser_points
+                    base_reward = self.win_points + (self.num_players - 1) * winner_points - sum_loser_points
                 else:
-                    self.rewards[f"player_{i}"] += -self.lose_points - (winner_points - self.points[i])
+                    base_reward = -self.lose_points - (winner_points - self.points[i])
+                
+                # Apply the deadlock tax to EVERYONE if the game was exhausted
+                if is_deadlock:
+                    base_reward += self.deadlock_tax
+                
+                self.rewards[f"player_{i}"] += base_reward
             
             # Terminate all agents
             for a in self.agents:
