@@ -153,8 +153,9 @@ class SplendorEnv(AECEnv):
         self.truncation_condition = lambda: (self.num_turns >= maximum_total_turns)
 
         self.mini_rewards = {
-            'buy_card': 1.0,
-            'get_noble': 5.0,
+            'buy_card': 0.5,
+            'get_noble': 3.0,
+            'get_point': 1.0,
         }
         self.lose_points = 100
         self.win_points = (self.num_players - 1) * self.lose_points
@@ -721,19 +722,23 @@ class SplendorEnv(AECEnv):
                 return (0, next_phase, next_player)
             case "buy_face_up":
                 tier, slot = action["tier"], action["slot"]
-                next_phase, player = buy_card(self.dealt[tier, slot])
+                card = self.dealt[tier, slot]
+                points_in_card = card[self.card_column_indexer['points']]
+                next_phase, player = buy_card(card)
                 deal_new_card(tier, slot)
-                return (self.mini_rewards['buy_card'], next_phase, player)
+                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, player)
             case "buy_reserved":
                 index = action["index"]
-                next_phase, player = buy_card(self.reserved[self.current_player, index])
+                card = self.reserved[self.current_player, index]
+                points_in_card = card[self.card_column_indexer['points']]
+                next_phase, player = buy_card(card)
                 self.reserved[self.current_player, index, self.card_column_indexer['available']] = 0
                 self.num_reserved[self.current_player] -= 1
                 # we shift over the remaining reserved cards
                 new_available_reserved_cards = self.reserved[self.current_player, :, self.card_column_indexer['available']] == 1
                 self.reserved[self.current_player, :self.num_reserved[self.current_player]] = self.reserved[self.current_player, new_available_reserved_cards]
                 self.reserved[self.current_player, self.num_reserved[self.current_player]:, :] = 0
-                return (self.mini_rewards['buy_card'], next_phase, player)
+                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, player)
             case "pick_noble":
                 assert self.current_phase == "pick_noble", f"Pick noble action taken in {self.current_phase} phase!"
                 index = action["index"]
