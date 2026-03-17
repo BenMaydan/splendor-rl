@@ -14,21 +14,21 @@ from env.splendor_env import SplendorEnv
 
 
 class CurriculumSchedule:
-    def __init__(self, total_timesteps, start_step=2_000_000, end_step=20_000_000, min_weight=0.2, max_weight=0.8):
+    def __init__(self, total_timesteps, start_step=2_000_000, min_weight=0.2, max_weight=0.8):
         self.total_timesteps = total_timesteps
         self.start_step = start_step
-        self.end_step = end_step
+        self.end_step = total_timesteps
         self.min_weight = min_weight
         self.max_weight = max_weight
 
-    def get_pool_weight(self, current_step):
+    def get_pool_weight(self, current_decisions):
         # Phase 1: Flat 0% (Pure self-play)
-        if current_step < self.start_step:
+        if current_decisions < self.start_step:
             return 0.0
         
         # Phase 2: Linear increase from min_weight (20%) to max_weight (80%)
         # Calculate progress between start_step and end_step
-        progress = (current_step - self.start_step) / (self.end_step - self.start_step)
+        progress = (current_decisions - self.start_step) / (self.end_step - self.start_step)
         progress = min(max(progress, 0.0), 1.0) # Clip between 0 and 1
         
         return self.min_weight + (progress * (self.max_weight - self.min_weight))
@@ -42,14 +42,14 @@ class SelfPlayPoolWrapper(gym.Env):
     A single-agent wrapper that assigns one agent as the 'Learner' and uses 
     a shared pool of historical policies to control the opponents.
     """
-    def __init__(self, aec_env, shared_pool, current_policy_container, curriculum_schedule=None, is_eval=False):
+    def __init__(self, aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=None, is_eval=False):
         super().__init__()
         self.env = aec_env
         self.shared_pool = shared_pool
         self.current_policy_container = current_policy_container
+        self.shared_decision_counter = shared_decision_counter
         self.is_eval = is_eval
         self.curriculum_schedule = curriculum_schedule
-        self.current_step = 0
         
         # Define Spaces based on a representative agent
         representative_agent = self.env.possible_agents[0]
@@ -79,7 +79,7 @@ class SelfPlayPoolWrapper(gym.Env):
             # Check if game is over or agent is dead
             if self.env.terminations[curr_agent] or self.env.truncations[curr_agent]:
                 self.env.step(None) # Execute dead step
-                
+
                 # If all agents are removed, game is fully over
                 if not self.env.agents:
                     break
@@ -91,7 +91,10 @@ class SelfPlayPoolWrapper(gym.Env):
             
             # Decide opponent action
             if policy is not None:
-                # SB3 policies accept raw observation dicts natively
+                # Track if the opponent is using the latest policy
+                if not self.is_eval and policy == self.current_policy_container[0]:
+                    self.shared_decision_counter[0] += 1
+
                 action, _ = policy.predict(flat_obs, action_masks=flat_obs["action_mask"], deterministic=False)
                 if isinstance(action, np.ndarray):
                     action = action.item()
@@ -114,14 +117,14 @@ class SelfPlayPoolWrapper(gym.Env):
 
     def reset(self, seed=None, options=None):
         self.env.reset(seed=seed, options=options)
-        
+
         # Randomize which seat the Learner sits in to prevent turn-order bias
         self.learner_agent = random.choice(self.env.possible_agents)
 
         # Get the current weight from the schedule
         if self.curriculum_schedule and not self.is_eval:
-            # We can pull the current total steps from the callback or track it here
-            pool_weight = self.curriculum_schedule.get_pool_weight(self.current_step)
+            # Sync schedule with the true number of decisions made
+            pool_weight = self.curriculum_schedule.get_pool_weight(self.shared_decision_counter[0])
         else:
             pool_weight = 1.0 if self.is_eval else 0.5 # Default behavior with no curriculum schedule
         
@@ -146,12 +149,14 @@ class SelfPlayPoolWrapper(gym.Env):
         return obs, info
         
     def step(self, action):
-        self.current_step += 1
+        # The Learner always uses the latest policy, so we track its decision
+        if not self.is_eval:
+            self.shared_decision_counter[0] += 1
 
-        # 1. Execute the Learner's action
+        # Execute the Learner's action
         self.env.step(action)
-        
-        # 2. Advance the game through all opponents' turns
+
+        # Advance the game through all opponents' turns
         obs, reward, term, trunc, info = self._advance_to_learner()
         
         return obs, float(reward), term, trunc, info
@@ -163,10 +168,11 @@ class SelfPlayPoolWrapper(gym.Env):
 
 class PolicyPoolCallback(BaseCallback):
     """Saves snapshots of the policy network into a shared pool periodically."""
-    def __init__(self, shared_pool, current_policy_container, save_freq, curriculum_schedule: CurriculumSchedule=None, max_pool_size=10, verbose=0):
+    def __init__(self, shared_pool, current_policy_container, shared_decision_counter, save_freq, curriculum_schedule: CurriculumSchedule=None, max_pool_size=10, verbose=0):
         super().__init__(verbose)
         self.shared_pool = shared_pool
         self.current_policy_container = current_policy_container
+        self.shared_decision_counter = shared_decision_counter # Read the shared state
         self.save_freq = save_freq
         self.max_pool_size = max_pool_size
         self.curriculum_schedule = curriculum_schedule
@@ -178,7 +184,10 @@ class PolicyPoolCallback(BaseCallback):
 
         # Periodically freeze a copy of the weights for the historical pool
         start_steps = self.curriculum_schedule.get_start_steps() if self.curriculum_schedule else 0
-        if self.n_calls % self.save_freq == 0 and self.n_calls >= start_steps:
+        
+        # We still save every N 'n_calls' (SB3 steps) for stability, 
+        # but we gate the start of the saving based on the actual true decisions.
+        if self.n_calls % self.save_freq == 0 and self.shared_decision_counter[0] >= start_steps:
             historical_policy = copy.deepcopy(self.model.policy)
             
             self.shared_pool.append(historical_policy)
@@ -238,20 +247,27 @@ def main():
     # We use lists to pass by reference between Callbacks and Environments
     shared_pool = []
     current_policy_container = [None] 
+    shared_decision_counter = [0] # New centralized clock
+
+    # Initialize Schedule (Assuming you want the pool to max out around the end of training)
+    curriculum = CurriculumSchedule(
+        total_timesteps=20_000_000,
+        start_step=2_000_000
+    )
 
     # 1. Initialize Train Env
     aec_env = SplendorEnv(num_players=4, render_mode="console")
-    gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, is_eval=False)
+    gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False)
     gym_env = Monitor(gym_env)
     env = ActionMasker(gym_env, mask_fn)
 
     # 2. Initialize Eval Env
     eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
-    eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, is_eval=True)
+    eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True)
     eval_env = ActionMasker(Monitor(eval_gym_env), mask_fn)
 
     # 3. Callbacks
-    checkpoint_callback = CheckpointCallback(save_freq=500_000, save_path="./logs/checkpoints/", name_prefix="splendor_ppo_mask")
+    checkpoint_callback = CheckpointCallback(save_freq=100_000, save_path="./logs/checkpoints/", name_prefix="splendor_ppo_mask")
     
     eval_callback = MaskableEvalCallback(
         eval_env,
@@ -265,8 +281,8 @@ def main():
     pass_action_idx = aec_env._action_indices_map["pass"][0] 
     stats_callback = SplendorStatsCallback(pass_action_index=pass_action_idx)
     
-    # Save a new snapshot to the historical pool every 50,000 steps (max 10 past models)
-    pool_callback = PolicyPoolCallback(shared_pool, current_policy_container, save_freq=50_000, max_pool_size=10)
+    # Pass the shared counter and curriculum to the pool callback
+    pool_callback = PolicyPoolCallback(shared_pool, current_policy_container, shared_decision_counter, save_freq=50_000, curriculum_schedule=curriculum, max_pool_size=10)
 
     callback_list = CallbackList([eval_callback, stats_callback, pool_callback, checkpoint_callback])
 
