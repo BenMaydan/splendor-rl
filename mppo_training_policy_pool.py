@@ -199,9 +199,10 @@ class PolicyPoolCallback(BaseCallback):
 
 class SplendorStatsCallback(BaseCallback):
     """Tracks custom stats for Splendor including Win Rate and Deadlock Rate."""
-    def __init__(self, pass_action_index, verbose=0):
+    def __init__(self, pass_action_index, shared_decision_counter, verbose=0):
         super().__init__(verbose)
         self.pass_action_index = pass_action_index
+        self.shared_decision_counter = shared_decision_counter
         self.total_episodes = 0
         self.deadlocks = 0
         self.wins = 0
@@ -280,7 +281,7 @@ def main():
     )
     
     pass_action_idx = aec_env._action_indices_map["pass"][0] 
-    stats_callback = SplendorStatsCallback(pass_action_index=pass_action_idx)
+    stats_callback = SplendorStatsCallback(pass_action_index=pass_action_idx, shared_decision_counter=shared_decision_counter)
     
     # Pass the shared counter and curriculum to the pool callback
     pool_callback = PolicyPoolCallback(shared_pool, current_policy_container, shared_decision_counter, save_freq=50_000, curriculum_schedule=curriculum, max_pool_size=10)
