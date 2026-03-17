@@ -900,7 +900,9 @@ class SplendorEnv(AECEnv):
         self.infos[agent] = {
             'phase': self.current_phase,
             'turn': self.current_player,
-            'action': action_dict
+            'action': action_dict,
+            'action_mask': self.action_mask,
+            'is_deadlock': is_deadlock
         }
 
     def render(self):

@@ -2,3 +2,4 @@ checkpoints/
 runs/
 logs/
 __pycache__/
+*.zip

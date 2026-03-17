@@ -77,14 +77,27 @@ class TrackPassCallback(BaseCallback):
         # Extract the action taken in the last step
         # actions is a numpy array because of VecEnv
         actions = self.locals.get("actions")
-        
+
         if actions is not None:
             # Increment count for every instance of a 'Pass' action in the batch
             self.pass_count += np.sum(actions == self.pass_action_index)
+        
+        # Track Deadlocks
+        # 'infos' is a list of dicts (one for each env in a VecEnv)
+        infos = self.locals.get("infos")
+        if infos is not None:
+            for info in infos:
+                # In SB3, when an episode ends, the 'info' dict contains 
+                # the final info of the episode.
+                if "is_deadlock" in info and info.get("is_deadlock"):
+                    # Check if the episode actually ended this step
+                    # (Standard SB3 logic for detecting end of episode in VecEnvs)
+                    if "terminal_observation" in info or info.get("TimeLimit.truncated"):
+                         self.deadlock_count += 1
 
-        # Log the cumulative count and the current step's status to TensorBoard
-        # We log every step, but TB will smooth/subsample it
+        # Log to TensorBoard
         self.logger.record("stats/cumulative_pass_actions", self.pass_count)
+        self.logger.record("stats/cumulative_deadlocks", self.deadlock_count)
         
         return True
 
@@ -143,12 +156,12 @@ def main():
     # MultiInputPolicy is used because observation_space is a spaces.Dict
     print("Initializing MaskablePPO...")
     model = MaskablePPO(
-        "MultiInputPolicy", 
-        env, 
+        "MultiInputPolicy",
+        env,
         gamma=0.99,
         learning_rate=linear_schedule(3e-4), # Starts at 3e-4 and drops to 0
         n_steps=8192,
-        seed=42, 
+        seed=42,
         verbose=1,
         tensorboard_log="./logs/tensorboard/"
     )
