@@ -231,6 +231,7 @@ class SplendorStatsCallback(BaseCallback):
                         self.logger.record("rates/win_rate", win_rate)
                         self.logger.record("rates/deadlock_rate", deadlock_rate)
 
+        self.logger.record("stats/total_actions_taken", self.shared_decision_counter[0])
         self.logger.record("stats/cumulative_pass_actions", self.pass_count)
         return True
 
