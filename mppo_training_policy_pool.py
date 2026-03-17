@@ -12,17 +12,44 @@ from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 # Import your custom environment here
 from env.splendor_env import SplendorEnv
 
+
+class CurriculumSchedule:
+    def __init__(self, total_timesteps, start_step=2_000_000, end_step=20_000_000, min_weight=0.2, max_weight=0.8):
+        self.total_timesteps = total_timesteps
+        self.start_step = start_step
+        self.end_step = end_step
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+
+    def get_pool_weight(self, current_step):
+        # Phase 1: Flat 0% (Pure self-play)
+        if current_step < self.start_step:
+            return 0.0
+        
+        # Phase 2: Linear increase from min_weight (20%) to max_weight (80%)
+        # Calculate progress between start_step and end_step
+        progress = (current_step - self.start_step) / (self.end_step - self.start_step)
+        progress = min(max(progress, 0.0), 1.0) # Clip between 0 and 1
+        
+        return self.min_weight + (progress * (self.max_weight - self.min_weight))
+    
+    def get_start_steps(self):
+        return self.start_step
+
+
 class SelfPlayPoolWrapper(gym.Env):
     """
     A single-agent wrapper that assigns one agent as the 'Learner' and uses 
     a shared pool of historical policies to control the opponents.
     """
-    def __init__(self, aec_env, shared_pool, current_policy_container, is_eval=False):
+    def __init__(self, aec_env, shared_pool, current_policy_container, curriculum_schedule=None, is_eval=False):
         super().__init__()
         self.env = aec_env
         self.shared_pool = shared_pool
         self.current_policy_container = current_policy_container
         self.is_eval = is_eval
+        self.curriculum_schedule = curriculum_schedule
+        self.current_step = 0
         
         # Define Spaces based on a representative agent
         representative_agent = self.env.possible_agents[0]
@@ -90,6 +117,13 @@ class SelfPlayPoolWrapper(gym.Env):
         
         # Randomize which seat the Learner sits in to prevent turn-order bias
         self.learner_agent = random.choice(self.env.possible_agents)
+
+        # Get the current weight from the schedule
+        if self.curriculum_schedule and not self.is_eval:
+            # We can pull the current total steps from the callback or track it here
+            pool_weight = self.curriculum_schedule.get_pool_weight(self.current_step)
+        else:
+            pool_weight = 1.0 if self.is_eval else 0.5 # Default behavior with no curriculum schedule
         
         # Assign policies to opponents for this match
         self.opponent_policies = {}
@@ -102,8 +136,8 @@ class SelfPlayPoolWrapper(gym.Env):
                     else:
                         self.opponent_policies[agent] = self.current_policy_container[0]
                 else:
-                    # In training, 80% chance to play history, 20% chance to play latest self
-                    if self.shared_pool and random.random() < 0.80:
+                    # Use the scheduled weight to decide Pool vs. Latest
+                    if self.shared_pool and random.random() < pool_weight:
                         self.opponent_policies[agent] = random.choice(self.shared_pool)
                     else:
                         self.opponent_policies[agent] = self.current_policy_container[0]
@@ -112,6 +146,8 @@ class SelfPlayPoolWrapper(gym.Env):
         return obs, info
         
     def step(self, action):
+        self.current_step += 1
+
         # 1. Execute the Learner's action
         self.env.step(action)
         
@@ -127,12 +163,13 @@ class SelfPlayPoolWrapper(gym.Env):
 
 class PolicyPoolCallback(BaseCallback):
     """Saves snapshots of the policy network into a shared pool periodically."""
-    def __init__(self, shared_pool, current_policy_container, save_freq, max_pool_size=10, verbose=0):
+    def __init__(self, shared_pool, current_policy_container, save_freq, curriculum_schedule: CurriculumSchedule=None, max_pool_size=10, verbose=0):
         super().__init__(verbose)
         self.shared_pool = shared_pool
         self.current_policy_container = current_policy_container
         self.save_freq = save_freq
         self.max_pool_size = max_pool_size
+        self.curriculum_schedule = curriculum_schedule
 
     def _on_step(self):
         # Always maintain a reference to the latest active policy
@@ -140,7 +177,8 @@ class PolicyPoolCallback(BaseCallback):
             self.current_policy_container[0] = self.model.policy
 
         # Periodically freeze a copy of the weights for the historical pool
-        if self.n_calls % self.save_freq == 0:
+        start_steps = self.curriculum_schedule.get_start_steps() if self.curriculum_schedule else 0
+        if self.n_calls % self.save_freq == 0 and self.n_calls >= start_steps:
             historical_policy = copy.deepcopy(self.model.policy)
             
             self.shared_pool.append(historical_policy)
