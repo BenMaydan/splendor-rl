@@ -359,7 +359,7 @@ def main():
             env,
             gamma=0.99,
             learning_rate=lr_schedule,
-            n_steps=8192,
+            n_steps=32768,
             seed=42,
             verbose=1,
             tensorboard_log="./logs/tensorboard/"

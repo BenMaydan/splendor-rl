@@ -66,6 +66,14 @@ interface GameT {
   nobles: NobleT[]
   winner: number | null
   turn: number
+  phase?: string
+  valid_actions?: {
+    buy: string[]
+    reserve: string[]
+    noble: string[]
+    take: string[]
+    discard: string[]
+  }
 }
 
 interface ChatT {
@@ -83,6 +91,8 @@ interface GameState extends GameT {
   showLog: boolean
   chat: ChatT[]
   chatNotify: boolean
+  selectedTokens: string[]
+  previewHover: number | null
 }
 
 interface ServerResponse {
@@ -107,9 +117,12 @@ let globalShowError = (resp: ServerResponse) => { return false }
     return gemColors.map((color: GemT) => {
       var cName = color + "chip"
       if (color === '*') cName = "schip"
+      var count = gems[color]
+      if (uuid === "bank" && count === 0) return null;
+      let isSelected = uuid === "bank" && game.state.selectedTokens && game.state.selectedTokens.indexOf(color) !== -1;
       return (
-        <div className={"gem " + cName} key={color + "_colors_" + uuid}>
-          <div className="bubble">{gems[color]}</div>
+        <div className={"gem " + cName + (isSelected ? " selected-gem" : "")} key={color + "_colors_" + uuid} style={isSelected ? { outline: '5px solid #2F80ED', borderRadius: '50%' } : {}}>
+          <div className="bubble">{count}</div>
           <div className="underlay" onClick={callback.bind(game, color)}>{symbol}</div>
         </div>
       );
@@ -133,17 +146,43 @@ let globalShowError = (resp: ServerResponse) => { return false }
         e.preventDefault();
         game.reserve.bind(game)(card.uuid)
       }
+      
+      const isMyTurn = game.state.turn === game.props.pid
+      const va = game.state.valid_actions
+      let canBuy = false
+      let canReserve = false
+      if (isMyTurn && va) {
+        if (va.buy.indexOf(card.uuid) !== -1) canBuy = true
+        if (va.reserve.indexOf(card.uuid) !== -1) canReserve = true
+      }
+
+      let affordClass = "";
+      if (isMyTurn || game.state.previewHover !== null) {
+         let pid = game.state.previewHover !== null ? game.state.previewHover : game.props.pid;
+         let p = game.state.players.find(x => x.id === pid);
+         if (p) {
+             let missing = 0;
+             for (let c of ['r', 'g', 'b', 'w', 'u']) {
+                let colorKey = c as keyof CostT & keyof GemsT & keyof CardsT;
+                let cost = card.cost[colorKey] || 0;
+                let available = (p.gems[colorKey] || 0) + (p.cards[colorKey] ? p.cards[colorKey].length : 0);
+                if (cost > available) missing += (cost - available);
+             }
+             if ((p.gems['*'] || 0) >= missing) affordClass = " buyable";
+             else affordClass = " unbuyable";
+         }
+      }
 
       if (card.color) {
         return (
           <div
-            className={"card card-" + card.color + " card-" + card.level}
+            className={`card card-${card.color} card-${card.level} ${(!canBuy && !canReserve && isMyTurn && va) ? "invalid-card" : ""} ${affordClass}`}
             id={card.uuid}
           >
-            <div className="reserve" onClick={reserver}>
+            <div className={`reserve ${!canReserve && isMyTurn && va ? "invalid-btn" : ""}`} onClick={reserver}>
               <img className="floppy" src="client/img/floppy.png" />
             </div>
-            <div className="overlay" onClick={buyer}></div>
+            <div className={`overlay ${!canBuy && isMyTurn && va ? "invalid-btn" : ""}`} onClick={buyer}></div>
             <div className="underlay">
               <div className="header">
                 <div className={"color " + card.color + "gem"}>
@@ -267,9 +306,9 @@ let globalShowError = (resp: ServerResponse) => { return false }
           );
         })
         return (
-          <div key={pid + "_set_" + color} className="colorSet">
+          <div key={pid + "_set_" + color} className="colorSet" style={{ display: cards.length > 0 ? "inline-block" : "none" }}>
             {cards}
-            <div className={cards.length > 0 ? "endcap" : "spacer"}></div>
+            {cards.length > 0 && <div className="endcap"></div>}
           </div>
         )
       })
@@ -295,7 +334,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
       const nobles = mapNobles(this.props.nobles, game)
 
       return (
-        <div className={"player" + you}>
+        <div className={"player" + you + (game.state.turn === pid ? " active-turn" : "")}>
           <div className="playerHeader">
             <div className="playerPoints">{this.props.points}</div>
             {this.state.editingName == null ?
@@ -314,17 +353,18 @@ let globalShowError = (resp: ServerResponse) => { return false }
               <div className="turnIndicator">&#8592;</div>
             }
           </div>
-          {game.state.selectedPlayer === pid ?
-            <div className="floater">
-              <div className="cards">
-                {set}
+          <div className="player-details">
+            <div className="player-main-column">
+              <div className="stats" style={{ marginBottom: "10px" }}>
+                <div className="gem-stats">{stats}</div>
               </div>
-              <div className="nobles">
-                {nobles}
+              <div className="floater">
+                <div className="nobles">
+                  {nobles}
+                </div>
               </div>
-              <div className="gems">
-                {gems}
-              </div>
+            </div>
+            <div className="player-reserve-column">
               <div className="reserveArea">
                 { reservedCount > 0 &&
                   <div>
@@ -337,14 +377,8 @@ let globalShowError = (resp: ServerResponse) => { return false }
                   </div>
                 }
               </div>
-            </div> :
-            <div className="stats">
-              <div className="gem-stats">{stats}</div>
-              <div className="reservedStat">
-                {reserved}
-              </div>
             </div>
-          }
+          </div>
         </div>
       );
     }
@@ -393,6 +427,8 @@ let globalShowError = (resp: ServerResponse) => { return false }
       showChat: false,
       showLog: false,
       chatNotify: false,
+      selectedTokens: [],
+      previewHover: null,
     } as GameState
 
     isMyTurn = (turn: number) => {
@@ -455,7 +491,13 @@ let globalShowError = (resp: ServerResponse) => { return false }
     }
 
     take = (color: string) => {
-      this.act('take', color)
+      let selected = [...this.state.selectedTokens];
+      if (selected.indexOf(color) !== -1) {
+         selected = this.state.selectedTokens.filter(c => c !== color);
+      } else {
+         if (selected.length < 3) selected.push(color);
+      }
+      this.setState({ selectedTokens: selected });
     }
 
     discard = (color: string) => {
@@ -503,7 +545,11 @@ let globalShowError = (resp: ServerResponse) => { return false }
       const json = await resp.json()
       if (!globalShowError(json)) {
         this.updateState(json)
-        this.poll()
+        let delay = 0;
+        if (json.state && json.state.turn !== this.props.pid) {
+           delay = 1000;
+        }
+        setTimeout(this.poll, delay);
       }
     }
 
@@ -552,10 +598,18 @@ let globalShowError = (resp: ServerResponse) => { return false }
       var gems = mapColors(this.state.gems, this, this.take, '', 'game');
       var nobles = mapNobles(this.state.nobles, this);
       var log = this.state.log.map((logLine, i) => {
+        var parts = logLine.msg.split(/(\[[rgubw*]\])/g);
+        var msgElements = parts.map((part, j) => {
+           if (part.match(/^\[[rgubw*]\]$/)) {
+             var c = part[1]; 
+             return <span key={j} className={`log-gem log-gem-${c}`}>{c}</span>
+           }
+           return <span key={j}>{part}</span>;
+        });
         return (
           <div key={"log-line-" + i} className="line">
             <span className="pid">{"[" + logLine.pid + "] "}</span>
-            <span className="msg">{logLine.msg}</span>
+            <span className="msg">{msgElements}</span>
           </div>
         );
       });
@@ -578,8 +632,24 @@ let globalShowError = (resp: ServerResponse) => { return false }
           />
         )
       });
+      var actionList: string[] = [];
+      if (this.state.valid_actions) {
+         if (this.state.valid_actions.buy && this.state.valid_actions.buy.length > 0) actionList.push("Buy");
+         if (this.state.valid_actions.reserve && this.state.valid_actions.reserve.length > 0) actionList.push("Reserve");
+         if (this.state.valid_actions.take && this.state.valid_actions.take.length > 0) actionList.push("Take Tokens");
+         if (this.state.valid_actions.noble && this.state.valid_actions.noble.length > 0) actionList.push("Pick Noble");
+         if (this.state.valid_actions.discard && this.state.valid_actions.discard.length > 0) actionList.push("Discard Tokens");
+      }
+      var phaseStr = this.state.phase ? this.state.phase.toUpperCase() : "PREGAME";
+
       return (
         <div>
+          <div className="phase-header">
+            <strong>Phase: {phaseStr}</strong>
+            {this.isMyTurn(this.state.turn) && actionList.length > 0 &&
+              <span> | Valid Actions: {actionList.join(', ')}</span>
+            }
+          </div>
           <div id="game-board">
             <div id="common-area">
               <div id="noble-area" className="split">
@@ -593,8 +663,16 @@ let globalShowError = (resp: ServerResponse) => { return false }
                   <div>Click on card to buy, click on </div><div><img className="floppy" src="client/img/floppy.png" /></div><div> to reserve.</div>
                 </div>
               </div>
-              <div id="gem-area" className="you">
-                {gems}
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px' }}>
+                <div id="gem-area" className="you">
+                  {gems}
+                </div>
+                {this.isMyTurn(this.state.turn) && this.state.selectedTokens.length > 0 &&
+                  <button onClick={() => { this.act('take', this.state.selectedTokens.join(',')); this.setState({selectedTokens: []}) }}
+                    style={{ padding: '10px 20px', cursor: 'pointer', background: '#F2C94C', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
+                    Confirm Tokens
+                  </button>
+                }
               </div>
             </div>
             <div id="player-area">
@@ -642,6 +720,9 @@ let globalShowError = (resp: ServerResponse) => { return false }
     gid: string
     error: string | null
     errorOpacity: number
+    numAIs: number
+    checkpoint: string
+    availableModels: string[]
   }
 
   class GameCreator extends React.PureComponent<{}, GameCreatorState> {
@@ -656,6 +737,9 @@ let globalShowError = (resp: ServerResponse) => { return false }
       gameName: '',
       errorOpacity: 0,
       error: null,
+      numAIs: 0,
+      checkpoint: 'splendor_ppo_mask.zip',
+      availableModels: [],
     } as GameCreatorState
 
     creating = false
@@ -717,7 +801,17 @@ let globalShowError = (resp: ServerResponse) => { return false }
       if (this.creating) return
       this.creating = true
       const gameName = this.state.gid === '' ? this.state.gameName : this.state.gid
-      const resp = await fetch(`/create/${gameName}`, { method: "POST" })
+      const payload = {
+        numAIs: this.state.numAIs,
+        checkpoint: this.state.checkpoint
+      }
+      const resp = await fetch(`/create/${gameName}`, { 
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      })
       const json = await resp.json()
 
       if (this.showError(json)) return
@@ -737,6 +831,11 @@ let globalShowError = (resp: ServerResponse) => { return false }
       globalShowError = this.showError
 
       if (window.location.pathname === "/") {
+        fetch(`/models`).then(async (resp) => {
+          const json = await resp.json()
+          this.setState({ availableModels: json.models || [] })
+        })
+
         fetch(`/suggest`).then(async (resp) => {
           const json = await resp.json()
           this.setState({
@@ -805,9 +904,25 @@ let globalShowError = (resp: ServerResponse) => { return false }
         return <div className="lobby">
           <div className="main-title">Splendor</div>
           <div className="desc">Play Splendor online with others. Enter a game name or use the suggested game name to start a game.</div>
-          <div className="name">
-            <input className="game-name" type="text" onChange={this.nameChange} onKeyPress={this.keyPress} value={this.state.gameName} />
-            <button onClick={this.createGame} className="create-game">Create Game</button>
+          <div className="name" style={{display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'center'}}>
+            <input className="game-name" type="text" onChange={this.nameChange} onKeyPress={this.keyPress} value={this.state.gameName} style={{marginBottom: '5px'}} />
+            <div>
+              <label style={{marginRight: '10px'}}>AIs: </label>
+              <select value={this.state.numAIs} onChange={(e) => this.setState({numAIs: parseInt(e.target.value)})}>
+                <option value={0}>0</option>
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+            </div>
+            <div>
+              <label style={{marginRight: '10px'}}>AI Checkpoint: </label>
+              <input type="text" list="ai-models" value={this.state.checkpoint} onChange={(e) => this.setState({checkpoint: e.target.value})} style={{width: '250px'}} />
+              <datalist id="ai-models">
+                {this.state.availableModels.map(m => <option key={m} value={m} />)}
+              </datalist>
+            </div>
+            <button onClick={this.createGame} className="create-game" style={{marginTop: '10px'}}>Create Game</button>
           </div>
           <ErrorMsg error={this.state.error} opacity={this.state.errorOpacity} />
         </div>

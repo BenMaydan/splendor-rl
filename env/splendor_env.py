@@ -210,7 +210,8 @@ class SplendorEnv(AECEnv):
         # (available, *color_requirements)
         self.nobles = np.zeros((self.max_num_nobles, len(self.nobles_columns)), dtype=np.uint8)
 
-        df = pd.read_csv(os.path.join(os.getcwd(), 'env', 'nobles.csv'), dtype=np.uint8)
+        basedir = os.path.dirname(os.path.abspath(__file__))
+        df = pd.read_csv(os.path.join(basedir, 'nobles.csv'), dtype=np.uint8)
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
         self.nobles_observation_limits_low = np.zeros(self.nobles.shape, dtype=np.uint8)
@@ -230,7 +231,8 @@ class SplendorEnv(AECEnv):
         Writes all the possible cards to the deck to initialize, to start the game
         """
         # Read without forcing uint8 on string columns - then shuffle
-        df = pd.read_csv(os.path.join(os.getcwd(), 'env', 'cards.csv'))
+        basedir = os.path.dirname(os.path.abspath(__file__))
+        df = pd.read_csv(os.path.join(basedir, 'cards.csv'))
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
         # Handle color mapping BEFORE casting to uint8

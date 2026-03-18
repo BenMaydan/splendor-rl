@@ -12,6 +12,91 @@ a {
   font-weight: bold;
 }
 
+.player-details {
+  display: flex;
+  flex-direction: row;
+}
+
+.player-main-column {
+  display: flex;
+  flex-direction: column;
+}
+
+.player-reserve-column {
+  margin-left: 20px;
+}
+
+.gems, .gem-stats {
+  display: flex;
+  justify-content: space-between;
+  width: 510px;
+}
+
+.phase-header {
+  font-size: 20px;
+  background-color: #333;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  text-align: center;
+  font-family: Arial, Helvetica, sans-serif;
+  font-style: normal;
+}
+
+.player {
+  padding: 10px;
+  border-radius: 8px;
+  border: 4px solid transparent;
+  transition: all 0.3s;
+}
+
+.active-turn {
+  border-color: #2F80ED;
+  background-color: rgba(47, 128, 237, 0.05);
+}
+
+.cards-viewport {
+  max-width: 440px;
+  overflow-x: auto;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: top;
+  margin-right: 5px;
+  padding-bottom: 5px;
+}
+
+.invalid-card {
+  opacity: 0.4;
+  filter: grayscale(0.8);
+}
+
+.invalid-btn {
+  pointer-events: none !important;
+  display: none !important;
+}
+
+.log-gem {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  text-align: center;
+  line-height: 14px;
+  font-size: 10px;
+  color: transparent;
+  margin: 0 2px;
+  vertical-align: middle;
+  border: 1px solid #333;
+}
+
+.log-gem-r { background-color: #E02727; }
+.log-gem-b { background-color: black; }
+.log-gem-g { background-color: #25D770; }
+.log-gem-w { background-color: white; }
+.log-gem-u { background-color: #4ACEF9; }
+.log-gem-\* { background-color: yellow; }
+
 .lobby {
   display: flex;
   flex-direction: column;
@@ -189,9 +274,10 @@ button {
 }
 
 #common-area {
-  height: 740px;
-  width: 670px;
-  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
 }
 
 #noble-area {
@@ -255,16 +341,14 @@ button {
 }
 
 @media screen and (orientation:landscape) {
-  #common-area, #player-area {
-    display: inline-block;
+  #game-board {
+    display: flex;
+    justify-content: center;
+    gap: 40px;
   }
 
   #player-area {
-    width: 500px;
-  }
-
-  #game-board {
-    width: 1170px;
+    width: 650px;
   }
 }
 
@@ -388,6 +472,20 @@ button {
   display: block;
 }
 
+#common-area .card.buyable:hover .overlay {
+  background-color: rgba(37, 215, 112, 0.4);
+}
+
+#common-area .card.unbuyable:hover .overlay {
+  background-color: rgba(224, 39, 39, 0.4);
+}
+
+.reserveText {
+  padding-bottom: 5px;
+  font-weight: bold;
+  text-align: center;
+}
+
 .reserve:hover {
   background-color: rgba(255, 255, 255, 0.7);
 }
@@ -449,12 +547,12 @@ button {
 }
 
 .colorSetInner {
-  height: 28px;
+  height: 20px;
   overflow: visible;
 }
 
 .spacer, .endcap {
-  width: 80px;
+  width: 65px;
   margin-right: 5px;
 }
 
@@ -467,13 +565,14 @@ button {
 }
 
 .floater {
-  width: 500px;
+  width: 520px;
+  display: flex;
+  flex-wrap: wrap;
 }
 
 .statSet {
   display: flex;
   flex-direction: column;
-  margin: 0 10px;
   width: 65px;
   align-items: center;
   justify-content: center;
