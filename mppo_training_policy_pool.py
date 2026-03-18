@@ -1,7 +1,10 @@
+import argparse
 import gymnasium as gym
 import numpy as np
 import random
 import copy
+import os
+import glob
 
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
@@ -239,21 +242,41 @@ class SplendorStatsCallback(BaseCallback):
 def mask_fn(env: gym.Env) -> np.ndarray:
     return env.unwrapped.action_masks()
 
-def linear_schedule(initial_value):
+def linear_schedule(initial_value, total_timesteps, already_done=0):
+    """
+    Linearly decreases learning rate from initial_value to 0, 
+    accounting for steps already completed in a previous run.
+    """
     def func(progress_remaining):
-        return progress_remaining * initial_value
+        # progress_remaining starts at 1.0 and goes to 0.0 for THIS learn() call.
+        # We need to map this back to the global progress.
+        
+        current_steps_in_this_run = (1.0 - progress_remaining) * (total_timesteps - already_done)
+        total_global_steps = already_done + current_steps_in_this_run
+        
+        global_progress_remaining = 1.0 - (total_global_steps / total_timesteps)
+        return max(0, global_progress_remaining * initial_value)
+        
     return func
 
 def main():
+    parser = argparse.ArgumentParser(description="Train Splendor RL Agent")
+    parser.add_argument("--checkpoint", type=str, default=None, 
+                        help="Path to the checkpoint .zip file to resume from.")
+    parser.add_argument("--initial-decisions", type=int, default=0, 
+                        help="The number of decisions already made, to correctly resume the curriculum schedule.")
+    parser.add_argument("--total-timesteps", type=int, default=20_000_000, 
+                        help="Total timesteps for this training run.")
+    args = parser.parse_args()
+
     # --- Shared Memory for Pool ---
-    # We use lists to pass by reference between Callbacks and Environments
     shared_pool = []
     current_policy_container = [None] 
-    shared_decision_counter = [0] # New centralized clock
+    shared_decision_counter = [args.initial_decisions] # Resume the internal game clock
 
     # Initialize Schedule (Assuming you want the pool to max out around the end of training)
     curriculum = CurriculumSchedule(
-        total_timesteps=20_000_000,
+        total_timesteps=args.total_timesteps,
         start_step=2_000_000
     )
 
@@ -288,22 +311,67 @@ def main():
 
     callback_list = CallbackList([eval_callback, stats_callback, pool_callback, checkpoint_callback])
 
-    # 4. Initialize MaskablePPO
-    print("Initializing MaskablePPO...")
-    model = MaskablePPO(
-        "MultiInputPolicy",
-        env,
-        gamma=0.99,
-        learning_rate=linear_schedule(3e-4),
-        n_steps=8192,
-        seed=42,
-        verbose=1,
-        tensorboard_log="./logs/tensorboard/"
+    # Calculate the new schedule
+    lr_schedule = linear_schedule(
+        initial_value=3e-4, 
+        total_timesteps=args.total_timesteps, 
+        already_done=args.initial_decisions
     )
+
+    # 4. Initialize or Load MaskablePPO
+    if args.checkpoint:
+        print(f"Loading model from checkpoint: {args.checkpoint}...")
+        model = MaskablePPO.load(
+            args.checkpoint,
+            env=env,
+            custom_objects={"learning_rate": lr_schedule}, # This overrides the old schedule
+            tensorboard_log="./logs/tensorboard/" # Ensure logging connects to the existing directory
+        )
+
+        checkpoint_dir = os.path.dirname(args.checkpoint)
+        # Find all .zip files in the checkpoint directory
+        all_checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.zip"))
+        
+        # Sort them by modification time (or you could parse the step number from the name)
+        all_checkpoints.sort(key=os.path.getmtime)
+        
+        # Take the 10 most recent checkpoints (excluding the one we are currently loading to train)
+        # We want "historical" versions, not the current one.
+        pool_candidates = [cp for cp in all_checkpoints if cp != args.checkpoint][-10:]
+        
+        print(f"Pre-filling pool with {len(pool_candidates)} historical checkpoints...")
+        for cp_path in pool_candidates:
+            print(f"Loading weights from {os.path.basename(cp_path)}...")
+
+            # 1. Pass custom_objects to prevent cloudpickle segfaults
+            # 2. Append the whole model to prevent orphaned C++ tensor references
+            temp_model = MaskablePPO.load(
+                cp_path,
+                device="cpu",
+                custom_objects={"learning_rate": lr_schedule}
+            )
+            temp_model.policy.eval()
+            shared_pool.append(temp_model)
+    else:
+        print("Initializing MaskablePPO from scratch...")
+        model = MaskablePPO(
+            "MultiInputPolicy",
+            env,
+            gamma=0.99,
+            learning_rate=lr_schedule,
+            n_steps=8192,
+            seed=42,
+            verbose=1,
+            tensorboard_log="./logs/tensorboard/"
+        )
 
     # 5. Train the agent
     print("Starting training...")
-    model.learn(total_timesteps=20_000_000, callback=callback_list)
+    model.learn(
+        total_timesteps=args.total_timesteps, 
+        callback=callback_list,
+        reset_num_timesteps=not bool(args.checkpoint) # CRITICAL: False when resuming to maintain schedules
+    )
 
     # 6. Save the final model
     model.save("splendor_ppo_mask")
