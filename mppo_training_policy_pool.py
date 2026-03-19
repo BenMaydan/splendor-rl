@@ -242,20 +242,14 @@ class SplendorStatsCallback(BaseCallback):
 def mask_fn(env: gym.Env) -> np.ndarray:
     return env.unwrapped.action_masks()
 
-def linear_schedule(initial_value, total_timesteps, already_done=0):
+def linear_schedule(initial_value):
     """
-    Linearly decreases learning rate from initial_value to 0, 
-    accounting for steps already completed in a previous run.
+    Linearly decreases learning rate from initial_value to 0.
+    SB3 automatically tracks global progress when reset_num_timesteps=False.
     """
     def func(progress_remaining):
-        # progress_remaining starts at 1.0 and goes to 0.0 for THIS learn() call.
-        # We need to map this back to the global progress.
-        
-        current_steps_in_this_run = (1.0 - progress_remaining) * (total_timesteps - already_done)
-        total_global_steps = already_done + current_steps_in_this_run
-        
-        global_progress_remaining = 1.0 - (total_global_steps / total_timesteps)
-        return max(0, global_progress_remaining * initial_value)
+        # progress_remaining is already perfectly scaled to the global total
+        return max(0.0, progress_remaining * initial_value)
         
     return func
 
@@ -312,11 +306,7 @@ def main():
     callback_list = CallbackList([eval_callback, stats_callback, pool_callback, checkpoint_callback])
 
     # Calculate the new schedule
-    lr_schedule = linear_schedule(
-        initial_value=3e-4, 
-        total_timesteps=args.total_timesteps, 
-        already_done=args.initial_decisions
-    )
+    lr_schedule = linear_schedule(3e-4)
 
     # 4. Initialize or Load MaskablePPO
     if args.checkpoint:

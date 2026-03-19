@@ -211,7 +211,8 @@ class SplendorEnv(AECEnv):
         self.nobles = np.zeros((self.max_num_nobles, len(self.nobles_columns)), dtype=np.uint8)
 
         basedir = os.path.dirname(os.path.abspath(__file__))
-        df = pd.read_csv(os.path.join(basedir, 'nobles.csv'), dtype=np.uint8)
+        nobles_csv_path = os.path.abspath(os.path.join(basedir, '..', 'data', 'nobles.csv'))
+        df = pd.read_csv(os.path.join(basedir, nobles_csv_path), dtype=np.uint8)
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
         self.nobles_observation_limits_low = np.zeros(self.nobles.shape, dtype=np.uint8)
@@ -232,7 +233,8 @@ class SplendorEnv(AECEnv):
         """
         # Read without forcing uint8 on string columns - then shuffle
         basedir = os.path.dirname(os.path.abspath(__file__))
-        df = pd.read_csv(os.path.join(basedir, 'cards.csv'))
+        cards_csv_path = os.path.abspath(os.path.join(basedir, '..', 'data', 'cards.csv'))
+        df = pd.read_csv(os.path.join(basedir, cards_csv_path))
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
         # Handle color mapping BEFORE casting to uint8
@@ -527,7 +529,7 @@ class SplendorEnv(AECEnv):
                 s, e = self._action_indices_map["buy_face_up"]
                 invalid_action_indices = np.logical_not(np.logical_and(
                     (self.dealt[..., self.card_column_indexer['available']] == 1).flatten(),
-                    self.get_purchasibility_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.dealt)
+                    self.get_purchasability_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.dealt)
                 )).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
 
@@ -535,7 +537,7 @@ class SplendorEnv(AECEnv):
                 s, e = self._action_indices_map["buy_reserved"]
                 invalid_action_indices = np.logical_not(np.logical_and(
                     self.reserved[self.current_player, ..., self.card_column_indexer['available']] == 1,
-                    self.get_purchasibility_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.reserved[self.current_player])
+                    self.get_purchasability_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.reserved[self.current_player])
                 )).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
             
@@ -609,7 +611,7 @@ class SplendorEnv(AECEnv):
         result[self.gold_index] = gold_needed
         return result
     
-    def get_purchasibility_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.uint8]:
+    def get_purchasability_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.uint8]:
         """
         Determines the token cost (and if gold tokens are necessary) to buy a card
         Return inf if player doesn't have enough tokens (including gold tokens)
