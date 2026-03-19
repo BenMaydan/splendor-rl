@@ -28,8 +28,9 @@ a {
 
 .gems, .gem-stats {
   display: flex;
-  justify-content: space-between;
-  width: 510px;
+  justify-content: flex-start;
+  gap: 15px;
+  width: auto;
 }
 
 .phase-header {
@@ -66,14 +67,40 @@ a {
   padding-bottom: 5px;
 }
 
-.invalid-card {
-  opacity: 0.4;
-  filter: grayscale(0.8);
-}
-
 .invalid-btn {
   pointer-events: none !important;
   display: none !important;
+}
+
+.card.unbuyable, .card.unbuyable .overlay {
+  cursor: not-allowed !important;
+}
+
+.card.buyable, .card.buyable .overlay {
+  cursor: pointer !important;
+}
+
+.preview-active #common-area .card .overlay {
+  display: block;
+  position: absolute;
+  border-radius: 6px;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+}
+
+.preview-active #common-area .card.buyable .overlay {
+  background-color: rgba(37, 215, 112, 0.4);
+}
+
+.preview-active #common-area .card.unbuyable .overlay {
+  background-color: rgba(224, 39, 39, 0.4);
+}
+
+#pending-area .gem {
+  height: 76px;
+  width: 76px;
 }
 
 .log-gem {
@@ -506,14 +533,13 @@ button {
 }
 
 .reserveCards {
-  vertical-align: top;
-  display: inline-block;
-  width: 291px;
-  height: 120px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  min-height: auto;
   border-radius: 5px;
-  padding: 7px;
-  padding-left: 10px;
-  padding-right: 2px;
+  padding: 7px 10px;
   border: 2px solid black;
   -webkit-box-shadow: inset 2px 2px 0px 0px rgba(0,0,0,0.2);
   -moz-box-shadow: inset 2px 2px 0px 0px rgba(0,0,0,0.2);
@@ -650,7 +676,7 @@ button {
 
 .stats {
   display: flex;
-  width: 600px;
+  width: auto;
   -webkit-text-fill-color: black;
 }
 
@@ -664,17 +690,16 @@ button {
 }
 
 .reserveText {
-  display: inline-block;
-  padding-left: 10px;
-  -ms-transform: rotate(90deg);
-  transform: rotate(90deg);
-  width: 20px;
-  height: 20px;
+  font-weight: bold;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  padding: 0;
+  margin-right: 5px;
   -webkit-text-fill-color: black;
 }
 
 .reserveArea {
-  margin-top: 20px;
+  margin-top: 0;
 }
 
 .card-r.card-level1 {

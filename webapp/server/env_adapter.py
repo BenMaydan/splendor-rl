@@ -233,24 +233,55 @@ class SplendorEnvAdapter:
         
     def _generate_log_msg(self, mapping):
         t = mapping.get('type')
+        p = self.env.current_player
+        name = getattr(self, f"player_name_{p}", f"Player {p+1}")
+        
+        def format_card(card, tier=None, is_noble=False):
+            if is_noble:
+                reqs = []
+                for i, c in enumerate(self.env.colors):
+                    if card[self.env.nobles_column_indexer[c]] > 0:
+                        reqs.append(f"{card[self.env.nobles_column_indexer[c]]}[{COLOR_INDEX_TO_STR[i]}]")
+                return f"Noble (3 points, requires {' '.join(reqs)})"
+            
+            pts = card[self.env.card_column_indexer['points']]
+            col_idx = card[self.env.card_column_indexer['color']]
+            color_str = f"[{COLOR_INDEX_TO_STR[col_idx]}] " if col_idx < 5 else ""
+            
+            costs = []
+            for i, c in enumerate(self.env.colors):
+                if card[self.env.card_column_indexer[c]] > 0:
+                    costs.append(f"{card[self.env.card_column_indexer[c]]}[{COLOR_INDEX_TO_STR[i]}]")
+                    
+            tier_str = f"level{tier+1} " if tier is not None else ""
+            return f"a {color_str}{tier_str}card ({pts} points, cost: {' '.join(costs)})"
+
         if t in ['take_3_diff_tokens', 'take_2_diff_tokens', 'take_1_token', 'take_2_identical_tokens', 'take_2_tokens']:
             if 'indices' in mapping:
                 colors = [f"[{COLOR_INDEX_TO_STR[i]}]" for i in mapping['indices']]
-                return f"took {' '.join(colors)}"
+                return f"{name} took {' '.join(colors)}"
             elif 'index' in mapping:
                 c = f"[{COLOR_INDEX_TO_STR[mapping['index']]}]"
-                return f"took {c} {c}"
-        elif t in ['buy_face_up', 'buy_reserved']:
-            return "bought a card"
-        elif t in ['reserve_face_up', 'reserve_face_down']:
-            return "reserved a card"
+                return f"{name} took {c} {c}"
+        elif t == 'buy_face_up':
+            card = self.env.dealt[mapping['tier']][mapping['slot']]
+            return f"{name} bought {format_card(card, mapping['tier'])}"
+        elif t == 'buy_reserved':
+            card = self.env.reserved[p][mapping['index']]
+            return f"{name} bought a reserved card, revealed as {format_card(card)}"
+        elif t == 'reserve_face_up':
+            card = self.env.dealt[mapping['tier']][mapping['slot']]
+            return f"{name} reserved {format_card(card, mapping['tier'])}"
+        elif t == 'reserve_face_down':
+            return f"{name} reserved a level{mapping['tier']+1} card face down"
         elif t == 'pick_noble':
-            return "was visited by a noble"
+            noble = self.env.nobles[mapping['index']]
+            return f"{name} was visited by a {format_card(noble, is_noble=True)}"
         elif t == 'discard_token':
             c = f"[{COLOR_INDEX_TO_STR[mapping['index']]}]"
-            return f"discarded {c}"
+            return f"{name} discarded {c}"
         elif t == 'pass':
-            return "passed"
+            return f"{name} passed"
         return ""
 
     def _execute_action_idx(self, a_idx):
@@ -357,10 +388,6 @@ class SplendorEnvAdapter:
         c_idx = STR_TO_COLOR_INDEX[color]
         if self.env.tokens_remaining[c_idx] <= 0:
             return {'error': "No gems remaining"}
-            
-        total_in_hand = np.sum(self.env.tokens_in_hand[self.env.current_player])
-        if total_in_hand + len(self.pending_take) >= 10:
-            return {'error': "Already at token limit"}
             
         if len(self.pending_take) == 0:
             self.pending_take.append(color)

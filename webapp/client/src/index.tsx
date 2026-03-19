@@ -118,12 +118,21 @@ let globalShowError = (resp: ServerResponse) => { return false }
       var cName = color + "chip"
       if (color === '*') cName = "schip"
       var count = gems[color]
-      if (uuid === "bank" && count === 0) return null;
-      let isSelected = uuid === "bank" && game.state.selectedTokens && game.state.selectedTokens.indexOf(color) !== -1;
+      if (uuid === "game" && count === 0) return null;
+      
+      let isGame = uuid === "game";
+      let dragProps = isGame && count > 0 ? {
+         draggable: true,
+         onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData("text/plain", color); }
+      } : {};
+      
+      let clickProps = (!isGame && count > 0) ? { onClick: () => callback(color as GemT) } : {};
+      let cursorStyle = isGame && count > 0 ? 'grab' : (!isGame && count > 0 ? 'pointer' : 'default');
+
       return (
-        <div className={"gem " + cName + (isSelected ? " selected-gem" : "")} key={color + "_colors_" + uuid} style={isSelected ? { outline: '5px solid #2F80ED', borderRadius: '50%' } : {}}>
+        <div className={"gem " + cName} key={color + "_colors_" + uuid} {...dragProps} {...clickProps} style={{ cursor: cursorStyle }}>
           <div className="bubble">{count}</div>
-          <div className="underlay" onClick={callback.bind(game, color)}>{symbol}</div>
+          <div className="underlay">{symbol}</div>
         </div>
       );
     });
@@ -137,7 +146,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     });
   }
 
-  class Card extends React.PureComponent<{ card: CardT, game: Game }, {}> {
+  class Card extends React.Component<{ card: CardT, game: Game }, {}> {
     render() {
       const card = this.props.card
       const game = this.props.game
@@ -157,32 +166,30 @@ let globalShowError = (resp: ServerResponse) => { return false }
       }
 
       let affordClass = "";
-      if (isMyTurn || game.state.previewHover !== null) {
-         let pid = game.state.previewHover !== null ? game.state.previewHover : game.props.pid;
-         let p = game.state.players.find(x => x.id === pid);
-         if (p) {
-             let missing = 0;
-             for (let c of ['r', 'g', 'b', 'w', 'u']) {
-                let colorKey = c as keyof CostT & keyof GemsT & keyof CardsT;
-                let cost = card.cost[colorKey] || 0;
-                let available = (p.gems[colorKey] || 0) + (p.cards[colorKey] ? p.cards[colorKey].length : 0);
-                if (cost > available) missing += (cost - available);
-             }
-             if ((p.gems['*'] || 0) >= missing) affordClass = " buyable";
-             else affordClass = " unbuyable";
-         }
+      let pid = game.state.previewHover !== null ? game.state.previewHover : game.props.pid;
+      let p = game.state.players.find(x => x.id === pid);
+      if (p) {
+          let missing = 0;
+          for (let c of ['r', 'g', 'b', 'w', 'u']) {
+             let colorKey = c as keyof CostT & keyof GemsT & keyof CardsT;
+             let cost = card.cost[colorKey] || 0;
+             let available = (p.gems[colorKey] || 0) + (p.cards[colorKey] ? p.cards[colorKey].length : 0);
+             if (cost > available) missing += (cost - available);
+          }
+          if ((p.gems['*'] || 0) >= missing) affordClass = " buyable";
+          else affordClass = " unbuyable";
       }
 
       if (card.color) {
         return (
           <div
-            className={`card card-${card.color} card-${card.level} ${(!canBuy && !canReserve && isMyTurn && va) ? "invalid-card" : ""} ${affordClass}`}
+            className={`card card-${card.color} card-${card.level}${affordClass}`}
             id={card.uuid}
           >
             <div className={`reserve ${!canReserve && isMyTurn && va ? "invalid-btn" : ""}`} onClick={reserver}>
               <img className="floppy" src="client/img/floppy.png" />
             </div>
-            <div className={`overlay ${!canBuy && isMyTurn && va ? "invalid-btn" : ""}`} onClick={buyer}></div>
+            <div className="overlay" onClick={canBuy ? buyer : undefined}></div>
             <div className="underlay">
               <div className="header">
                 <div className={"color " + card.color + "gem"}>
@@ -216,7 +223,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     }
   }
 
-  class Noble extends React.PureComponent<{ noble: NobleT, game: Game }, {}> {
+  class Noble extends React.Component<{ noble: NobleT, game: Game }, {}> {
     render() {
       const noble = this.props.noble
       const game = this.props.game
@@ -261,7 +268,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     selectedPlayer: number
   }
 
-  class Player extends React.PureComponent<PlayerProps, { editingName: string | null }> {
+  class Player extends React.Component<PlayerProps, { editingName: string | null }> {
     state = { editingName: null as string | null }
 
     editName = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -314,8 +321,11 @@ let globalShowError = (resp: ServerResponse) => { return false }
       })
 
       const stats = gemColors.map((color) => {
+        let isDiscard = (game.state.turn === pid && game.state.phase === "discard" && collection[color]['gems'] > 0);
         return (
-          <div className="statSet" key={"stat" + color}>
+          <div className="statSet" key={"stat" + color}
+               onClick={isDiscard ? () => game.act('discard', color) : undefined}
+               style={{ cursor: isDiscard ? 'pointer' : 'default' }}>
             <div className={`stat stat${color === '*' ? 'y' : color}`}>{collection[color]['gems'] + (color == '*' ? '' : ' / ' + collection[color]['cards'])}</div>
             {color === '*' ? <React.Fragment /> : <div><img className="labelImg" src="client/img/labels.png" /></div>}
           </div>
@@ -349,6 +359,16 @@ let globalShowError = (resp: ServerResponse) => { return false }
               </div>
             }
             <div className="playerName2">{youName}</div>
+            {game.props.pid !== pid && (
+              <button
+                onMouseEnter={() => game.setState({ previewHover: pid })}
+                onMouseLeave={() => game.setState({ previewHover: null })}
+                className="preview-btn"
+                style={{ marginLeft: '10px', fontSize: '12px', cursor: 'pointer', background: '#ccc', border: '1px solid #999', borderRadius: '4px', padding: '2px 5px' }}
+              >
+                👁️ Preview
+              </button>
+            )}
             {game.state.turn === pid &&
               <div className="turnIndicator">&#8592;</div>
             }
@@ -367,7 +387,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
             <div className="player-reserve-column">
               <div className="reserveArea">
                 { reservedCount > 0 &&
-                  <div>
+                  <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
                     <div className="reserveText">
                       reserved
                     </div>
@@ -384,7 +404,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     }
   }
 
-  class Level extends React.PureComponent<{ name: string, remaining: number, game: Game, cards: CardT[] }, {}> {
+  class Level extends React.Component<{ name: string, remaining: number, game: Game, cards: CardT[] }, {}> {
     render() {
       return (
         <div>
@@ -409,7 +429,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     }
   }
 
-  class Game extends React.PureComponent<{ gid: string, pid: number, uuid: string }, GameState> {
+  class Game extends React.Component<{ gid: string, pid: number, uuid: string }, GameState> {
     state = {
       players: [],
       gems: {},
@@ -459,6 +479,8 @@ let globalShowError = (resp: ServerResponse) => { return false }
           gems: r.state.gems,
           nobles: r.state.nobles,
           turn: r.state.turn,
+          phase: r.state.phase,
+          valid_actions: r.state.valid_actions,
         });
 
         if (r.state.winner !== null && this.state.phase != "postgame") {
@@ -490,13 +512,30 @@ let globalShowError = (resp: ServerResponse) => { return false }
       return '?pid=' + this.props.pid + '&uuid=' + this.props.uuid
     }
 
+    untake = (index: number) => {
+      let selected = [...this.state.selectedTokens];
+      selected.splice(index, 1);
+      this.setState({ selectedTokens: selected });
+    }
+
     take = (color: string) => {
       let selected = [...this.state.selectedTokens];
-      if (selected.indexOf(color) !== -1) {
-         selected = this.state.selectedTokens.filter(c => c !== color);
-      } else {
-         if (selected.length < 3) selected.push(color);
-      }
+      let counts: { [key: string]: number } = {};
+      selected.forEach(c => counts[c] = (counts[c]||0) + 1);
+      
+      let isDuplicateSelection = selected.length === 1 && selected[0] === color;
+      
+      if (selected.length >= 3) return; // Max 3 total
+      if (selected.length === 2 && selected[0] === selected[1]) return; // Cannot exceed 2 if double taking
+      if (selected.length >= 1 && selected[0] !== color && Object.keys(counts).some(k => counts[k] === 2)) return; // Cannot take another if already took double
+      if (selected.length === 2 && selected[0] !== selected[1] && selected.indexOf(color) !== -1) return; // Cannot take double if already took different
+      
+      let bankCount = this.state.gems[color as keyof GemsT] || 0;
+      let selectedCount = counts[color] || 0;
+      if (bankCount - selectedCount <= 0) return;
+      if (isDuplicateSelection && bankCount < 4) return; // Cannot double take if bank has < 4 total initially
+      
+      selected.push(color);
       this.setState({ selectedTokens: selected });
     }
 
@@ -595,9 +634,29 @@ let globalShowError = (resp: ServerResponse) => { return false }
           />
         );
       });
-      var gems = mapColors(this.state.gems, this, this.take, '', 'game');
+      var displayGems = { ...this.state.gems };
+      this.state.selectedTokens.forEach(c => {
+         let key = c as keyof GemsT;
+         if (displayGems[key] !== undefined && displayGems[key]! > 0) displayGems[key]!--;
+      });
+      var bankGems = mapColors(displayGems, this, this.take, '', 'game');
+      
+      var pendingGems = this.state.selectedTokens.map((color, idx) => {
+         var cName = color + "chip";
+         return (
+           <div className={"gem " + cName} key={"pending_" + idx}
+             draggable={true}
+             onDragStart={(e: React.DragEvent) => {
+               e.dataTransfer.setData("text/plain", idx.toString());
+               e.dataTransfer.setData("action", "untake");
+             }}
+             style={{ cursor: 'grab' }}>
+             <div className="underlay"></div>
+           </div>
+         );
+      });
       var nobles = mapNobles(this.state.nobles, this);
-      var log = this.state.log.map((logLine, i) => {
+      var log = [...this.state.log].reverse().map((logLine, i) => {
         var parts = logLine.msg.split(/(\[[rgubw*]\])/g);
         var msgElements = parts.map((part, j) => {
            if (part.match(/^\[[rgubw*]\]$/)) {
@@ -608,7 +667,6 @@ let globalShowError = (resp: ServerResponse) => { return false }
         });
         return (
           <div key={"log-line-" + i} className="line">
-            <span className="pid">{"[" + logLine.pid + "] "}</span>
             <span className="msg">{msgElements}</span>
           </div>
         );
@@ -649,8 +707,11 @@ let globalShowError = (resp: ServerResponse) => { return false }
             {this.isMyTurn(this.state.turn) && actionList.length > 0 &&
               <span> | Valid Actions: {actionList.join(', ')}</span>
             }
+            {this.isMyTurn(this.state.turn) && this.state.phase === "discard" &&
+              <span style={{ color: 'red', marginLeft: '10px', fontWeight: 'bold' }}>Click one of your gems below to discard!</span>
+            }
           </div>
-          <div id="game-board">
+          <div id="game-board" className="preview-active">
             <div id="common-area">
               <div id="noble-area" className="split">
                 {nobles}
@@ -664,15 +725,56 @@ let globalShowError = (resp: ServerResponse) => { return false }
                 </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px' }}>
-                <div id="gem-area" className="you">
-                  {gems}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+                  <div id="gem-area" className="you"
+                       onDragOver={(e) => e.preventDefault()}
+                       onDrop={(e) => {
+                           e.preventDefault();
+                           if (e.dataTransfer.getData("action") === "untake") {
+                               this.untake(parseInt(e.dataTransfer.getData("text/plain")));
+                           }
+                       }}>
+                    {bankGems}
+                  </div>
+                  <div id="pending-area" style={{ display: 'flex', minHeight: '80px', minWidth: '300px', border: '2px dashed #999', borderRadius: '8px', padding: '10px', gap: '10px', alignItems: 'center', justifyContent: 'center' }}
+                       onDragOver={(e) => e.preventDefault()}
+                       onDrop={(e) => {
+                           e.preventDefault();
+                           let color = e.dataTransfer.getData("text/plain");
+                           let action = e.dataTransfer.getData("action");
+                           if (!action && color) { 
+                               this.take(color);
+                           }
+                       }}>
+                    {pendingGems.length === 0 ? <span style={{color: '#999'}}>Drag tokens here to take</span> : pendingGems}
+                  </div>
                 </div>
-                {this.isMyTurn(this.state.turn) && this.state.selectedTokens.length > 0 &&
-                  <button onClick={() => { this.act('take', this.state.selectedTokens.join(',')); this.setState({selectedTokens: []}) }}
-                    style={{ padding: '10px 20px', cursor: 'pointer', background: '#F2C94C', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
-                    Confirm Tokens
-                  </button>
-                }
+                {this.isMyTurn(this.state.turn) && this.state.phase === "main" && (
+                  (() => {
+                    let isMax = false;
+                    let selected = this.state.selectedTokens;
+                    let myGemsCount = 0;
+                    if (this.props.pid >= 0) {
+                      let myGems = this.state.players.find(p => p.id === this.props.pid)?.gems;
+                      myGemsCount = (myGems?.r||0) + (myGems?.g||0) + (myGems?.b||0) + (myGems?.u||0) + (myGems?.w||0);
+                    }
+                    let spaceLeft = 10 - myGemsCount;
+                    if (selected.length === 2 && selected[0] === selected[1]) isMax = true;
+                    else if (selected.length === 3) isMax = true;
+                    else if (selected.length >= spaceLeft) isMax = true;
+                    else if (selected.length > 0) {
+                        let canPickMore = (['w','u','g','b','r'] as (keyof GemsT)[]).some(c => (this.state.gems[c]||0) > 0 && selected.indexOf(c as string) === -1);
+                        if (!canPickMore) isMax = true;
+                    }
+                    return (
+                      <button onClick={() => { this.act('take', selected.join(',')); this.setState({selectedTokens: []}) }}
+                        disabled={!isMax}
+                        style={{ padding: '10px 20px', cursor: isMax ? 'pointer' : 'not-allowed', background: '#F2C94C', border: 'none', borderRadius: '4px', fontWeight: 'bold', opacity: isMax ? 1 : 0.5 }}>
+                        Confirm Tokens
+                      </button>
+                    )
+                  })()
+                )}
               </div>
             </div>
             <div id="player-area">

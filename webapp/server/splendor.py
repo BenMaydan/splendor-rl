@@ -322,7 +322,10 @@ def act(game, action, target):
         return {'error': 'Not your turn'}
 
     if action == 'take':
-        result = game.take(target)
+        for c in target.split(','):
+            result = game.take(c)
+            if 'error' in result:
+                break
     elif action == 'buy':
         result = game.buy(target)
     elif action == 'reserve':
