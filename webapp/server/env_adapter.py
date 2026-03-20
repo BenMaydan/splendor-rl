@@ -28,7 +28,7 @@ class SplendorEnvAdapter:
         # Pre-assign UUIDs to all cards in the deck
         for tier in range(self.env.num_tiers):
             tier_cards = self.env.deck[tier]
-            for i in range(self.env.max_num_cards_at_tier[tier]):
+            for i in range(self.env._max_num_cards_at_tier[tier]):
                 card = tier_cards[i]
                 sig = self._card_sig(card)
                 self._assign_uuid(sig)
@@ -113,7 +113,7 @@ class SplendorEnvAdapter:
         # Fill cards (dealt)
         for tier in range(self.env.num_tiers):
             t_name = f"level{tier+1}"
-            state['decks'][t_name] = int(self.env.max_num_cards_at_tier[tier] - self.env.num_dealt_at_tier[tier])
+            state['decks'][t_name] = int(self.env._max_num_cards_at_tier[tier] - self.env.num_dealt_at_tier[tier])
             for slot in range(4):
                 card = self.env.dealt[tier][slot]
                 if card[self.env.card_column_indexer['available']] == 1:
