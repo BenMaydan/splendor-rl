@@ -107,12 +107,20 @@ def mask_fn(env: gym.Env) -> np.ndarray:
     """Helper function for ActionMasker wrapper."""
     return env.unwrapped.action_masks()
 
-def linear_schedule(initial_value):
+def linear_schedule(initial_value, floor=5e-5):
+    """
+    Decays linearly but stays at 'floor' instead of hitting 0.
+    """
     def func(progress_remaining):
-        return progress_remaining * initial_value
+        # progress_remaining goes from 1.0 to 0.0
+        val = progress_remaining * initial_value
+        return max(val, floor)
     return func
 
 def main():
+
+    TARGET_GAMMA = 0.993
+
     # 1. Initialize your base AEC environment
     aec_env = SplendorEnv(num_players=4, render_mode="console")
 
@@ -134,8 +142,7 @@ def main():
         venv,
         norm_obs=False,
         norm_reward=True,
-        clip_obs=10.,
-        gamma=0.998,
+        gamma=TARGET_GAMMA,
     )
 
     # 5. Set up Callbacks
@@ -165,8 +172,7 @@ def main():
         eval_venv,
         training=False,
         norm_reward=False,
-        norm_obs=False,
-        clip_obs=10.
+        norm_obs=False
     )
     
     eval_callback = MaskableEvalCallback(
@@ -198,9 +204,12 @@ def main():
         "MultiInputPolicy",
         env,
         policy_kwargs=custom_policy_kwargs,
-        gamma=0.99,
+        gamma=TARGET_GAMMA,
         learning_rate=linear_schedule(3e-4), # Starts at 3e-4 and drops to 0
-        n_steps=8192,
+        n_steps=32768,                       # Collect a massive "experience buffer"
+        batch_size=4096,                     # update based on 4096 turns at once - before this was 64 which is less than half of a game
+        n_epochs=10,                         # look at each batch 10 times, multiple passes means it can gain more information about what helped it win
+        ent_coef=0.2,                        # this is necessary so the model keeps exploring -- also because splendor is stochastic
         seed=42,
         verbose=1,
         tensorboard_log="./logs/tensorboard/"
