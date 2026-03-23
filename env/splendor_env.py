@@ -141,6 +141,9 @@ class SplendorEnv(AECEnv):
         self._max_num_cards_at_tier = None
         self.num_dealt_at_tier = None
 
+        # the purchasability map is (num_players, num_tiers, num_slots)
+        purchasability_shape = (self.num_players, self.num_tiers, self.num_slots)
+
         # setting observation limits about the dealt tensor
         dealt_shape = (self.num_tiers, self.num_slots, self.card_num_columns)
         self.dealt_observation_limits_high = np.zeros(dealt_shape, dtype=np.uint8)
@@ -149,6 +152,8 @@ class SplendorEnv(AECEnv):
         self.dealt_observation_limits_high[:, :, self.card_column_indexer['color']] = len(self.colors)
         self.dealt_observation_limits_high[:, :, self.color_indices] = 7
 
+        self.max_able_to_reserve = 3
+        self.max_tokens_allowed = 10
         self.points = np.zeros((self.num_players,), dtype=np.int8)
         self.reserved = np.zeros((self.num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
         self.num_reserved = np.zeros((self.num_players,), dtype=np.uint8)
@@ -156,8 +161,6 @@ class SplendorEnv(AECEnv):
         self.discounts = np.zeros((self.num_players, len(self.colors)), dtype=np.int8)
         self.tokens_remaining = np.zeros((1 + len(self.colors),), dtype=np.uint8)
         self.tokens_in_hand = np.zeros((self.num_players, 1 + len(self.colors)), dtype=np.int8)
-        self.max_able_to_reserve = 3
-        self.max_tokens_allowed = 10
 
         self.num_nobles_points = 3
         self.nobles_columns = ['available'] + self.colors
@@ -213,6 +216,7 @@ class SplendorEnv(AECEnv):
                 "tier_3_remaining": spaces.Box(low=0, high=self._max_num_cards_at_tier[2], shape=(1,), dtype=np.uint8),
                 "nobles_remaining": spaces.Box(low=0, high=5, shape=(1,), dtype=np.uint8),
                 "tokens_remaining": spaces.Box(low=0, high=7, shape=self.tokens_remaining.shape, dtype=np.uint8),
+                "purchasability": spaces.MultiBinary(purchasability_shape),
                 "dealt": spaces.Box(low=0, high=self.dealt_observation_limits_high, shape=dealt_shape, dtype=np.uint8),
                 "nobles": spaces.Box(low=self.nobles_observation_limits_low, high=self.nobles_observation_limits_high, shape=self.nobles.shape, dtype=np.uint8),
                 "points": spaces.Box(low=0, high=22, shape=self.points.shape, dtype=np.int8),
@@ -321,7 +325,7 @@ class SplendorEnv(AECEnv):
         elif self.num_players == 2:
             self.tokens_remaining += 4
         self.tokens_remaining[self.gold_index] = 5
-        
+
         self.num_passes_in_a_row = 0
 
     def reset(self, seed=None, options=None):
@@ -642,7 +646,7 @@ class SplendorEnv(AECEnv):
         result[self.gold_index] = gold_needed
         return result
     
-    def get_purchasability_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.uint8]:
+    def get_purchasability_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.bool_]:
         """
         Determines the token cost (and if gold tokens are necessary) to buy a card.
         Returns an unflattened mask matching the spatial dimensions of the cards.
@@ -688,7 +692,7 @@ class SplendorEnv(AECEnv):
         gold_needed = np.sum(deficit_per_color, axis=-1)
         
         # Create the final map
-        purchasability_map = (gold_tokens >= gold_needed).astype(np.uint8)
+        purchasability_map = gold_tokens >= gold_needed
         
         # --- OUTPUT SHAPE ASSERTION ---
         # The output shape should perfectly match the cards array, minus the feature dimension
@@ -857,11 +861,13 @@ class SplendorEnv(AECEnv):
                 "phase": self.phases.index(self.current_phase),
                 "relative_player_seat": np.array([(player_idx + self.num_players - self.starting_player) % 4], dtype=np.uint8),
 
-                "tier_1_remaining": np.array([self._max_num_cards_at_tier[0]], dtype=np.uint8),
-                "tier_2_remaining": np.array([self._max_num_cards_at_tier[1]], dtype=np.uint8),
-                "tier_3_remaining": np.array([self._max_num_cards_at_tier[2]], dtype=np.uint8),
+                "tier_1_remaining": np.array([self._max_num_cards_at_tier[0] - self.num_dealt_at_tier[0]], dtype=np.uint8),
+                "tier_2_remaining": np.array([self._max_num_cards_at_tier[1] - self.num_dealt_at_tier[1]], dtype=np.uint8),
+                "tier_3_remaining": np.array([self._max_num_cards_at_tier[2] - self.num_dealt_at_tier[2]], dtype=np.uint8),
                 "nobles_remaining": np.array([self.num_nobles_available], dtype=np.uint8),
                 "tokens_remaining": self.tokens_remaining,
+
+                "purchasability": self.get_purchasability_map(self.tokens_in_hand, self.discounts, self.dealt),
                 
                 "dealt": self.dealt,
                 "nobles": self.nobles,
