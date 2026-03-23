@@ -191,9 +191,17 @@ def main():
     # 6. Initialize MaskablePPO
     # MultiInputPolicy is used because observation_space is a spaces.Dict
     print("Initializing MaskablePPO...")
+
+    # Define a wider and deeper network
+    # For example: 3 hidden layers (depth), with 256 neurons each (width)
+    custom_policy_kwargs = dict(
+        net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256])
+    )
+
     model = MaskablePPO(
         "MultiInputPolicy",
         env,
+        policy_kwargs=custom_policy_kwargs,
         gamma=0.99,
         learning_rate=linear_schedule(3e-4), # Starts at 3e-4 and drops to 0
         n_steps=8192,
