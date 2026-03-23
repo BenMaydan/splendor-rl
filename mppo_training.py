@@ -73,6 +73,7 @@ class TrackPassCallback(BaseCallback):
         super().__init__(verbose)
         self.pass_action_index = pass_action_index
         self.pass_count = 0
+        self.deadlock_count = 0
 
     def _on_step(self) -> bool:
         # Extract the action taken in the last step
