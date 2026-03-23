@@ -270,7 +270,7 @@ def main():
     current_policy_container = [None] 
     shared_decision_counter = [args.initial_decisions] # Resume the internal game clock
 
-    TARGET_GAMMA = 0.993
+    TARGET_GAMMA = 0.98
 
     # Initialize Schedule (Assuming you want the pool to max out around the end of training)
     curriculum = CurriculumSchedule(
