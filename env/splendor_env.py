@@ -149,14 +149,14 @@ class SplendorEnv(AECEnv):
         self.dealt_observation_limits_high[:, :, self.card_column_indexer['color']] = len(self.colors)
         self.dealt_observation_limits_high[:, :, self.color_indices] = 7
 
-        self.points = None
-        self.reserved = None
-        self.num_reserved = None
+        self.points = np.zeros((self.num_players,), dtype=np.int8)
+        self.reserved = np.zeros((self.num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
+        self.num_reserved = np.zeros((self.num_players,), dtype=np.uint8)
+        self.num_cards_in_hand = np.zeros((self.num_players,), dtype=np.uint8)
+        self.discounts = np.zeros((self.num_players, len(self.colors)), dtype=np.int8)
+        self.tokens_remaining = np.zeros((1 + len(self.colors),), dtype=np.uint8)
+        self.tokens_in_hand = np.zeros((self.num_players, 1 + len(self.colors)), dtype=np.int8)
         self.max_able_to_reserve = 3
-        self.num_cards_in_hand = None
-        self.discounts = None
-        self.tokens_remaining = None
-        self.tokens_in_hand = None
         self.max_tokens_allowed = 10
 
         self.num_nobles_points = 3
@@ -202,6 +202,8 @@ class SplendorEnv(AECEnv):
         self.initialize_misc()
 
         # initializing observation space
+        # TODO: make all observations about costs be relative to the player
+        # so dealt for example should be the cost for the player who can buy it
         self.single_observation_space = spaces.Dict({
             "observation": spaces.Dict({
                 "phase": spaces.Discrete(len(self.phases)),
@@ -303,12 +305,15 @@ class SplendorEnv(AECEnv):
         """
         # TODO: fix this so we don't allocate new arrays every time reset is called.
         # need to store num_players x (discount_red, discount_blue, ..., discount_gold)
-        self.points = np.zeros((self.num_players,), dtype=np.int8)
-        self.reserved = np.zeros((self.num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
-        self.num_reserved = np.zeros((self.num_players,), dtype=np.uint8)
-        self.num_cards_in_hand = np.zeros((self.num_players,), dtype=np.uint8)
-        self.discounts = np.zeros((self.num_players, len(self.colors)), dtype=np.int8)
-        self.tokens_remaining = np.zeros((1 + len(self.colors),), dtype=np.uint8)
+        self.points[:] = 0
+        self.reserved[:] = 0
+        self.num_reserved[:] = 0
+        self.num_cards_in_hand[:] = 0
+        self.discounts[:] = 0
+        self.tokens_remaining[:] = 0
+        self.tokens_in_hand[:] = 0
+
+        # actually initialize tokens remaining tensor
         if self.num_players == 4:
             self.tokens_remaining += 7
         elif self.num_players == 3:
@@ -316,7 +321,7 @@ class SplendorEnv(AECEnv):
         elif self.num_players == 2:
             self.tokens_remaining += 4
         self.tokens_remaining[self.gold_index] = 5
-        self.tokens_in_hand = np.zeros((self.num_players, 1 + len(self.colors)), dtype=np.int8)
+        
         self.num_passes_in_a_row = 0
 
     def reset(self, seed=None, options=None):
