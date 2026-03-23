@@ -9,6 +9,7 @@ import glob
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CallbackList, BaseCallback, CheckpointCallback
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 
@@ -242,14 +243,15 @@ class SplendorStatsCallback(BaseCallback):
 def mask_fn(env: gym.Env) -> np.ndarray:
     return env.unwrapped.action_masks()
 
-def linear_schedule(initial_value):
+def linear_schedule(initial_value, floor=5e-5):
     """
-    Linearly decreases learning rate from initial_value to 0.
+    Linearly decreases learning rate from initial_value to floor.
     SB3 automatically tracks global progress when reset_num_timesteps=False.
     """
     def func(progress_remaining):
         # progress_remaining is already perfectly scaled to the global total
-        return max(0.0, progress_remaining * initial_value)
+        val = progress_remaining * initial_value
+        return max(floor, val)
         
     return func
 
@@ -268,6 +270,8 @@ def main():
     current_policy_container = [None] 
     shared_decision_counter = [args.initial_decisions] # Resume the internal game clock
 
+    TARGET_GAMMA = 0.993
+
     # Initialize Schedule (Assuming you want the pool to max out around the end of training)
     curriculum = CurriculumSchedule(
         total_timesteps=args.total_timesteps,
@@ -276,17 +280,46 @@ def main():
 
     # 1. Initialize Train Env
     aec_env = SplendorEnv(num_players=4, render_mode="console")
-    gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False)
-    gym_env = Monitor(gym_env)
-    env = ActionMasker(gym_env, mask_fn)
+    
+    def make_env():
+        gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False)
+        gym_env = Monitor(gym_env)
+        return ActionMasker(gym_env, mask_fn)
+
+    venv = DummyVecEnv([make_env])
+    
+    vec_norm_path = os.path.join(os.path.dirname(args.checkpoint), "vec_normalize.pkl") if args.checkpoint else None
+    if vec_norm_path and os.path.exists(vec_norm_path):
+        env = VecNormalize.load(vec_norm_path, venv)
+        env.training = True
+        env.norm_reward = True
+        env.gamma = TARGET_GAMMA
+    else:
+        env = VecNormalize(
+            venv,
+            norm_obs=False,
+            norm_reward=True,
+            gamma=TARGET_GAMMA,
+        )
 
     # 2. Initialize Eval Env
     eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
-    eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True)
-    eval_env = ActionMasker(Monitor(eval_gym_env), mask_fn)
+    
+    def make_eval_env():
+        eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True)
+        return ActionMasker(Monitor(eval_gym_env), mask_fn)
+
+    eval_venv = DummyVecEnv([make_eval_env])
+
+    eval_env = VecNormalize(
+        eval_venv,
+        training=False,
+        norm_reward=False,
+        norm_obs=False
+    )
 
     # 3. Callbacks
-    checkpoint_callback = CheckpointCallback(save_freq=100_000, save_path="./logs/checkpoints/", name_prefix="splendor_ppo_mask")
+    checkpoint_callback = CheckpointCallback(save_freq=500_000, save_path="./logs/checkpoints/", name_prefix="splendor_ppo_mask")
     
     eval_callback = MaskableEvalCallback(
         eval_env,
@@ -307,6 +340,10 @@ def main():
 
     # Calculate the new schedule
     lr_schedule = linear_schedule(3e-4)
+
+    custom_policy_kwargs = dict(
+        net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256])
+    )
 
     # 4. Initialize or Load MaskablePPO
     if args.checkpoint:
@@ -347,9 +384,13 @@ def main():
         model = MaskablePPO(
             "MultiInputPolicy",
             env,
-            gamma=0.99,
+            policy_kwargs=custom_policy_kwargs,
+            gamma=TARGET_GAMMA,
             learning_rate=lr_schedule,
             n_steps=32768,
+            batch_size=4096,
+            n_epochs=10,
+            ent_coef=0.2,
             seed=42,
             verbose=1,
             tensorboard_log="./logs/tensorboard/"
@@ -363,8 +404,9 @@ def main():
         reset_num_timesteps=not bool(args.checkpoint) # CRITICAL: False when resuming to maintain schedules
     )
 
-    # 6. Save the final model
+    # 6. Save the final model and VecNormalize stats
     model.save("splendor_ppo_mask")
+    env.save("vec_normalize.pkl")
     print("Training complete and model saved.")
 
 if __name__ == "__main__":
