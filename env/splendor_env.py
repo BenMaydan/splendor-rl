@@ -702,6 +702,23 @@ class SplendorEnv(AECEnv):
         
         return purchasability_map
 
+    def _end_of_turn_check(self) -> tuple[str, int]:
+        """
+        Evaluates noble eligibility at the very end of a player's turn sequence.
+        Returns (next_phase, next_player).
+        """
+        available_nobles_mask = self.nobles[:, self.nobles_column_indexer['available']] == 1
+        
+        if np.any(available_nobles_mask):
+            available_nobles_cost = self.nobles[available_nobles_mask][..., self.nobles_color_indices]
+            # If the player's engine affords any available noble
+            if np.any(np.all(self.discounts[self.current_player] >= available_nobles_cost, axis=-1)):
+                return "pick_noble", self.current_player
+                
+        # If no noble is triggered, officially pass the turn
+        next_player = (self.current_player + 1) % self.num_players
+        return "main", next_player
+
     def _apply_action(self, action) -> tuple[int, str, int]:
         """
         Applies the action to the current environment
@@ -719,7 +736,7 @@ class SplendorEnv(AECEnv):
         else:
             self.num_passes_in_a_row = 0
 
-        def buy_card(card) -> tuple[str, int]:
+        def buy_card(card) -> None:
             # can't be none since we know the action is valid
             cost = self._token_cost(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], card)
             assert cost is not None and isinstance(cost, np.ndarray), f"Cost = {cost}"
@@ -728,12 +745,6 @@ class SplendorEnv(AECEnv):
             self.points[self.current_player] += card[self.card_column_indexer['points']]
             self.num_cards_in_hand[self.current_player] += 1
             self.discounts[self.current_player][card[self.card_column_indexer['color']]] += 1
-
-            # Need to take into account awarding the noble of the players choice if he can get it
-            available_nobles_cost = self.nobles[self.nobles[:, self.nobles_column_indexer['available']] == 1][..., self.nobles_color_indices]
-            if np.any(np.all(self.discounts[self.current_player] >= available_nobles_cost, axis=-1), axis=0):
-                return "pick_noble", self.current_player
-            return self.current_phase, next_player
         
         def deal_new_card(tier, slot=None):
             # deal new card to dealt assuming there are cards left
@@ -753,14 +764,20 @@ class SplendorEnv(AECEnv):
                 self.tokens_remaining[token_indices] -= 1
                 if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     return (0, "discard", self.current_player)
-                return (0, self.current_phase, next_player)
+
+                next_phase, next_p = self._end_of_turn_check()
+                return (0, next_phase, next_p)
+
             case "take_2_identical_tokens":
                 token_index = action["index"]
                 self.tokens_in_hand[self.current_player, token_index] += 2
                 self.tokens_remaining[token_index] -= 2
                 if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     return (0, "discard", self.current_player)
-                return (0, self.current_phase, next_player)
+
+                next_phase, next_p = self._end_of_turn_check()
+                return (0, next_phase, next_p)
+
             case "reserve_face_up":
                 tier, slot = action["tier"], action["slot"]
                 # put reserved card in players reserved pile
@@ -772,16 +789,15 @@ class SplendorEnv(AECEnv):
                     self.tokens_in_hand[self.current_player, self.gold_index] += 1
                     self.tokens_remaining[self.gold_index] -= 1
                 
-                # make sure to move to discard if getting gold token brings you over the limit of allowed tokens
-                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
-                    next_phase = 'discard'
-                    next_player = self.current_player
-                else:
-                    next_phase = self.current_phase
-                
                 deal_new_card(tier, slot)
                 
-                return (0, next_phase, next_player)
+                # make sure to move to discard if getting gold token brings you over the limit of allowed tokens
+                if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
+                    return (0, "discard", self.current_player)
+                
+                next_phase, next_p = self._end_of_turn_check()
+                return (0, next_phase, next_p)
+
             case "reserve_face_down":
                 tier = action["tier"]
                 # put reserved card in players reserved pile
@@ -797,47 +813,64 @@ class SplendorEnv(AECEnv):
                 
                 # make sure to move to discard if getting gold token brings you over the limit of allowed tokens
                 if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
-                    next_phase = 'discard'
-                    next_player = self.current_player
-                else:
-                    next_phase = self.current_phase
+                    return (0, "discard", self.current_player)
                 
-                return (0, next_phase, next_player)
+                next_phase, next_p = self._end_of_turn_check()
+                return (0, next_phase, next_p)
+
             case "buy_face_up":
                 tier, slot = action["tier"], action["slot"]
                 card = self.dealt[tier, slot]
                 points_in_card = card[self.card_column_indexer['points']]
-                next_phase, player = buy_card(card)
+
+                buy_card(card)
                 deal_new_card(tier, slot)
-                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, player)
+
+                next_phase, next_p = self._end_of_turn_check()
+                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, next_p)
+
             case "buy_reserved":
                 index = action["index"]
                 card = self.reserved[self.current_player, index]
                 points_in_card = card[self.card_column_indexer['points']]
-                next_phase, player = buy_card(card)
+
+                buy_card(card)
+
                 self.reserved[self.current_player, index, self.card_column_indexer['available']] = 0
                 self.num_reserved[self.current_player] -= 1
                 # we shift over the remaining reserved cards
                 new_available_reserved_cards = self.reserved[self.current_player, :, self.card_column_indexer['available']] == 1
                 self.reserved[self.current_player, :self.num_reserved[self.current_player]] = self.reserved[self.current_player, new_available_reserved_cards]
                 self.reserved[self.current_player, self.num_reserved[self.current_player]:, :] = 0
-                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, player)
+
+                next_phase, next_p = self._end_of_turn_check()
+                return (self.mini_rewards['buy_card'] + points_in_card * self.mini_rewards['get_point'], next_phase, next_p)
+
             case "pick_noble":
                 assert self.current_phase == "pick_noble", f"Pick noble action taken in {self.current_phase} phase!"
                 index = action["index"]
                 self.points[self.current_player] += 3
                 self.nobles[index, self.nobles_column_indexer['available']] = 0
+
+                # Rule enforcement: Turn ends immediately after picking a noble.
                 return (self.mini_rewards['get_noble'], "main", next_player)
+
             case "discard_token":
                 assert self.current_phase == "discard", f"Discard action taken in {self.current_phase} phase!"
                 index = action["index"]
                 self.tokens_remaining[index] += 1
                 self.tokens_in_hand[self.current_player][index] -= 1
+
                 if np.sum(self.tokens_in_hand[self.current_player]) > self.max_tokens_allowed:
                     return (0, "discard", self.current_player)
-                return (0, "main", next_player)
+
+                # Discarding finishes the turn sequence, so check for nobles now
+                next_phase, next_p = self._end_of_turn_check()
+                return (0, next_phase, next_p)
+
             case "pass":
-                return (0, self.current_phase, next_player)
+                return (0, "main", next_player)
+
             case _:
                 raise gym.error.InvalidAction(f"Action {action} is ill-defined!")
 
