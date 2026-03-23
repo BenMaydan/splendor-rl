@@ -5,6 +5,7 @@ import os
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CallbackList, BaseCallback, CheckpointCallback
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.maskable.evaluation import evaluate_policy
@@ -113,15 +114,33 @@ def linear_schedule(initial_value):
 def main():
     # 1. Initialize your base AEC environment
     aec_env = SplendorEnv(num_players=4, render_mode="console")
-    
-    # 2. Wrap it for single-agent Gymnasium compatibility (Self-Play)
-    gym_env = PettingZooToGymWrapper(aec_env)
-    
-    # 3. Wrap with Monitor to log episode statistics (required for EvalCallback)
-    gym_env = Monitor(gym_env)
-    
-    # 4. Wrap with ActionMasker so MaskablePPO can pull the valid actions
-    env = ActionMasker(gym_env, mask_fn)
+
+    def make_env():
+        env = PettingZooToGymWrapper(aec_env)
+        env = Monitor(env)
+        env = ActionMasker(env, mask_fn)
+        return env
+
+    # 3. Create Vectorized Env (Required for VecNormalize)
+    # Even if you only have 1 env, SB3 needs the VecEnv interface
+    venv = DummyVecEnv([make_env])
+
+    # 4. Wrap with VecNormalize
+    # norm_obs=True scales the gem counts/board state
+    # norm_reward=True scales that 350 max reward down to ~1.0 range
+    all_keys = venv.observation_space.keys()
+    norm_keys = [ # Filter out 'phase' or any key that isn't a Box space
+        key for key in all_keys 
+        if isinstance(venv.observation_space[key], gym.spaces.Box)
+    ]
+    env = VecNormalize(
+        venv,
+        norm_obs=True,
+        norm_reward=True,
+        clip_obs=10.,
+        gamma=0.998,
+        norm_obs_keys=norm_keys
+    )
 
     # 5. Set up Callbacks
 
@@ -135,7 +154,24 @@ def main():
     # Set up Maskable Eval Callback
     # We create a separate identical environment for evaluation to prevent messing up training state
     eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
-    eval_env = ActionMasker(Monitor(PettingZooToGymWrapper(eval_aec_env)), mask_fn)
+
+    def make_eval_env():
+        env = PettingZooToGymWrapper(eval_aec_env)
+        env = Monitor(env)
+        env = ActionMasker(env, mask_fn)
+        return env
+
+    # Wrap in DummyVecEnv just like the training environment
+    eval_venv = DummyVecEnv([make_eval_env])
+
+    # Wrap with VecNormalize, ensuring training and reward normalization are disabled
+    eval_env = VecNormalize(
+        eval_venv,
+        training=False,
+        norm_reward=False,
+        norm_obs=True,
+        clip_obs=10.
+    )
     
     eval_callback = MaskableEvalCallback(
         eval_env,
@@ -170,8 +206,9 @@ def main():
     print("Starting training...")
     model.learn(total_timesteps=20_000_000, callback=callback_list)
 
-    # 8. Save the final model
+    # 8. Save the final model and VecNormalize stats
     model.save("splendor_ppo_mask")
+    env.save("vec_normalize.pkl")  # Save the normalization stats!
     print("Training complete and model saved.")
 
     # 9. Clean up and demonstrate loading/running
@@ -181,21 +218,31 @@ def main():
     # Run a test game
     print("\nRunning a test game with the trained agent...")
     test_aec_env = SplendorEnv(num_players=4, render_mode="console")
-    test_env = ActionMasker(PettingZooToGymWrapper(test_aec_env), mask_fn)
-    
-    obs, info = test_env.reset()
+
+    def make_test_env():
+        test_wrapped = PettingZooToGymWrapper(test_aec_env)
+        return ActionMasker(test_wrapped, mask_fn)
+
+    test_venv = DummyVecEnv([make_test_env])
+
+    # Load the saved normalization stats and disable training/reward norm
+    test_env = VecNormalize.load("vec_normalize.pkl", test_venv)
+    test_env.training = False
+    test_env.norm_reward = False
+
+    obs = test_env.reset()
     done = False
-    
+
     while not done:
-        # Retrieve the current action mask directly from the wrapped environment
-        action_masks = mask_fn(test_env)
-        
+        # ActionMasker requires pulling the mask from the unwrapped env directly
+        # Since test_env is now wrapped in VecNormalize and DummyVecEnv, we access the unwrapped env
+        action_masks = test_env.venv.envs[0].unwrapped.action_masks()
+
         # Predict the action, ensuring we pass the action mask
         action, _states = model.predict(obs, action_masks=action_masks, deterministic=True)
-        
+
         # Step the environment
-        obs, reward, terminated, truncated, info = test_env.step(action)
-        done = terminated or truncated
+        obs, reward, done, info = test_env.step(action)
 
     print("Test game finished!")
 
