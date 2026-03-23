@@ -128,18 +128,13 @@ def main():
     # 4. Wrap with VecNormalize
     # norm_obs=True scales the gem counts/board state
     # norm_reward=True scales that 350 max reward down to ~1.0 range
-    all_keys = venv.observation_space.keys()
-    norm_keys = [ # Filter out 'phase' or any key that isn't a Box space
-        key for key in all_keys 
-        if isinstance(venv.observation_space[key], gym.spaces.Box)
-    ]
+    # For now we don't normalize observation since we have non spaces.Box observations, which are incompatible
     env = VecNormalize(
         venv,
-        norm_obs=True,
+        norm_obs=False,
         norm_reward=True,
         clip_obs=10.,
         gamma=0.998,
-        norm_obs_keys=norm_keys
     )
 
     # 5. Set up Callbacks
@@ -169,7 +164,7 @@ def main():
         eval_venv,
         training=False,
         norm_reward=False,
-        norm_obs=True,
+        norm_obs=False,
         clip_obs=10.
     )
     

@@ -51,9 +51,7 @@ def test_single_player_multiple_cards(env: SplendorEnv):
 
 def test_multiple_players_multiple_cards(env: SplendorEnv):
     # Repeat the dealt cards along a new player axis to cleanly pass the function's strict shape assertions
-    batched_dealt = np.repeat(env.dealt[np.newaxis, ...], env.num_players, axis=0)
-    
-    purchasability_map = env.get_purchasability_map(env.tokens_in_hand, env.discounts, batched_dealt)
+    purchasability_map = env.get_purchasability_map(env.tokens_in_hand, env.discounts, env.dealt)
     assert purchasability_map.shape == (env.num_players, env.num_tiers, env.num_slots)
 
     color_indices = env.color_indices

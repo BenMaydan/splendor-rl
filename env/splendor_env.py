@@ -682,10 +682,15 @@ class SplendorEnv(AECEnv):
 
         # Align dimensions dynamically for multi-player batched inputs
         if tokens_in_hand.ndim > 1:
-            while regular_tokens.ndim < raw_costs.ndim:
-                regular_tokens = np.expand_dims(regular_tokens, axis=-2)
-                discounts = np.expand_dims(discounts, axis=-2)
-                gold_tokens = np.expand_dims(gold_tokens, axis=-1)
+            # Calculate the number of spatial dimensions on the board
+            # e.g., dealt cards (3, 4, 5) -> 2 spatial dims.
+            num_spatial_dims = raw_costs.ndim - 1
+            
+            # Insert the required number of '1' dimensions right after the player dimension
+            for _ in range(num_spatial_dims):
+                regular_tokens = np.expand_dims(regular_tokens, axis=1)
+                discounts = np.expand_dims(discounts, axis=1)
+                gold_tokens = np.expand_dims(gold_tokens, axis=1)
 
         # Compute cost
         deficit_per_color = np.maximum(0, raw_costs - discounts - regular_tokens)
@@ -697,6 +702,10 @@ class SplendorEnv(AECEnv):
         # --- OUTPUT SHAPE ASSERTION ---
         # The output shape should perfectly match the cards array, minus the feature dimension
         expected_output_shape = cards.shape[:-1]
+        if tokens_in_hand.ndim > 1:
+            # If batched, prepend the num_players dimension to the expected output
+            expected_output_shape = (tokens_in_hand.shape[0],) + expected_output_shape
+
         assert purchasability_map.shape == expected_output_shape, f"Expected output shape {expected_output_shape}, got {purchasability_map.shape}"
         # ------------------------------
         
