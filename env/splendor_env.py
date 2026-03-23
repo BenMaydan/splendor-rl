@@ -244,11 +244,19 @@ class SplendorEnv(AECEnv):
         """
         # (available, *color_requirements)
         self.nobles = np.zeros((self.max_num_nobles, len(self.nobles_columns)), dtype=np.uint8)
-        available_nobles_pool = np.copy(self._all_nobles)
 
-        np.random.shuffle(available_nobles_pool)
-        self.nobles[:self.num_nobles_available, :] = available_nobles_pool[:self.num_nobles_available, :]
-        assert np.all(self.nobles[:, self.nobles_column_indexer['available']] == 1)
+        # Select random indices without replacement.
+        chosen_indices = np.random.choice(
+            self._all_nobles.shape[0],
+            size=self.num_nobles_available,
+            replace=False
+        )
+
+        # Assign the randomly selected nobles to the active slots
+        self.nobles[:self.num_nobles_available, :] = self._all_nobles[chosen_indices]
+
+        # Assert only on the nobles that were actually dealt into play
+        assert np.all(self.nobles[:self.num_nobles_available, self.nobles_column_indexer['available']] == 1)
     
     def initialize_deck(self):
         """
@@ -293,6 +301,7 @@ class SplendorEnv(AECEnv):
         """
         Initialize observational data about purchased self + opponents card
         """
+        # TODO: fix this so we don't allocate new arrays every time reset is called.
         # need to store num_players x (discount_red, discount_blue, ..., discount_gold)
         self.points = np.zeros((self.num_players,), dtype=np.int8)
         self.reserved = np.zeros((self.num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
