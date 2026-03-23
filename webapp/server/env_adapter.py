@@ -8,8 +8,8 @@ import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from env.splendor_env import SplendorEnv
 
-COLOR_INDEX_TO_STR = {0: 'r', 1: 'g', 2: 'u', 3: 'w', 4: 'b'}
-STR_TO_COLOR_INDEX = {'r': 0, 'g': 1, 'u': 2, 'w': 3, 'b': 4}
+COLOR_INDEX_TO_STR = {0: 'r', 1: 'g', 2: 'u', 3: 'w', 4: 'b', 5: '*'}
+STR_TO_COLOR_INDEX = {'r': 0, 'g': 1, 'u': 2, 'w': 3, 'b': 4, '*': 5}
 
 class SplendorEnvAdapter:
     def __init__(self, num_players=4):
@@ -373,8 +373,13 @@ class SplendorEnvAdapter:
         return {'error': "Noble not available"}
         
     def discard(self, color):
-        if self.env.current_phase != "discard":
+        if self.current_phase != "discard":
             return {'error': "Not in discard phase"}
+        
+        # Use the updated STR_TO_COLOR_INDEX which now contains '*'
+        if color not in STR_TO_COLOR_INDEX:
+            return {'error': f"Unknown color: {color}"}
+            
         c_idx = STR_TO_COLOR_INDEX[color]
         a_idx = self._get_action_index(lambda m: m['type'] == 'discard_token' and m['index'] == c_idx)
         if a_idx is not None:
