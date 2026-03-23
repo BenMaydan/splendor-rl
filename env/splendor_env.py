@@ -562,18 +562,16 @@ class SplendorEnv(AECEnv):
                 # an invalid action is: not (card available and card purchasable), which is de'morgans law
                 # we can reuse logic to see which face up cards are available
                 s, e = self._action_indices_map["buy_face_up"]
-                invalid_action_indices = np.logical_not(np.logical_and(
-                    self.dealt[..., self.card_column_indexer['available']] == 1,
+                invalid_action_indices = np.logical_not(
                     self.get_purchasability_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.dealt)
-                )).flatten()
+                ).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
 
                 # mask out invalid actions of buying reserved card
                 s, e = self._action_indices_map["buy_reserved"]
-                invalid_action_indices = np.logical_not(np.logical_and(
-                    self.reserved[self.current_player, ..., self.card_column_indexer['available']] == 1,
+                invalid_action_indices = np.logical_not(
                     self.get_purchasability_map(self.tokens_in_hand[self.current_player], self.discounts[self.current_player], self.reserved[self.current_player])
-                )).flatten()
+                ).flatten()
                 self.action_mask[s:e][invalid_action_indices] = 0
             
             case "pick_noble":
@@ -696,8 +694,14 @@ class SplendorEnv(AECEnv):
         deficit_per_color = np.maximum(0, raw_costs - discounts - regular_tokens)
         gold_needed = np.sum(deficit_per_color, axis=-1)
         
-        # Create the final map
-        purchasability_map = gold_tokens >= gold_needed
+        # 1. Determine if the player can afford the raw cost
+        affordability_map = gold_tokens >= gold_needed
+        
+        # 2. Extract the availability mask directly from the cards tensor
+        availability_mask = cards[..., self.card_column_indexer['available']] == 1
+        
+        # 3. Create the final map via logical AND
+        purchasability_map = np.logical_and(affordability_map, availability_mask)
         
         # --- OUTPUT SHAPE ASSERTION ---
         # The output shape should perfectly match the cards array, minus the feature dimension

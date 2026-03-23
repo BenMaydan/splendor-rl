@@ -20,12 +20,13 @@ def test_single_player_single_card(env: SplendorEnv):
     tier, slot = 0, 0
     
     card = env.dealt[tier, slot]
+    available = card[env.card_column_indexer['available']] == 1
     tokens = env.tokens_in_hand[player]
     discounts = env.discounts[player]
     
     # Function should return a 0D boolean scalar (or 1D if you forced flattening, but our latest returns native spatial shape)
     purchasable_map = env.get_purchasability_map(tokens, discounts, card)
-    expected = is_purchasable(env.color_indices, env.gold_index, card, tokens, discounts)
+    expected = available and is_purchasable(env.color_indices, env.gold_index, card, tokens, discounts)
     
     assert purchasable_map.shape == (), f"Expected scalar shape (), got {purchasable_map.shape}"
     assert purchasable_map == expected, "Single player single card logic mismatch"
@@ -45,7 +46,9 @@ def test_single_player_multiple_cards(env: SplendorEnv):
     expected_map = np.zeros((env.num_tiers, env.num_slots), dtype=bool)
     for tier in range(env.num_tiers):
         for slot in range(env.num_slots):
-            expected_map[tier, slot] = is_purchasable(color_indices, gold_index, cards[tier, slot], tokens, discounts)
+            card = cards[tier, slot]
+            available = card[env.card_column_indexer['available']] == 1
+            expected_map[tier, slot] = available and is_purchasable(color_indices, gold_index, card, tokens, discounts)
             
     assert np.all(purchasable_map == expected_map), "Single player multiple cards logic mismatch"
 
@@ -61,10 +64,12 @@ def test_multiple_players_multiple_cards(env: SplendorEnv):
     for player in range(env.num_players):
         for tier in range(env.num_tiers):
             for slot in range(env.num_slots):
-                non_vectorized_purchasibility_map[player, tier, slot] = is_purchasable(
+                card = env.dealt[tier, slot]
+                available = card[env.card_column_indexer['available']] == 1
+                non_vectorized_purchasibility_map[player, tier, slot] = available and is_purchasable(
                     color_indices,
                     gold_index,
-                    env.dealt[tier, slot],
+                    card,
                     env.tokens_in_hand[player],
                     env.discounts[player]
                 )
@@ -82,6 +87,13 @@ if __name__ == "__main__":
         env.reset()
         env.tokens_in_hand = initialize_tokens_in_hand(env)
         env.discounts = initialize_discounts(env)
+        
+        # randomly set some cards to be unavailable - with 10% chance
+        num_cards_dealt = env.num_tiers * env.num_slots
+        for tier in range(env.num_tiers):
+            for slot in range(env.num_slots):
+                if np.random.random() <= (1.0 / num_cards_dealt):
+                    env.dealt[tier, slot, env.card_column_indexer['available']] = 0
         
         test_single_player_single_card(env)
         test_single_player_multiple_cards(env)
