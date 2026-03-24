@@ -9,6 +9,7 @@ import random
 import pandas as pd
 import itertools
 import os
+import functools
 
 
 def read_nobles_csv(num_nobles_columns, nobles_column_indexer, nobles_color_indices, colors):
@@ -227,14 +228,6 @@ class SplendorEnv(AECEnv):
             }),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.num_total_actions,), dtype=np.uint8)
         })
-
-        # Action Spaces (Dict mapping agent to space)
-        self.action_spaces = {
-            agent: spaces.Discrete(self.num_total_actions) for agent in self.possible_agents
-        }
-        self.observation_spaces = {
-            agent: self.single_observation_space for agent in self.possible_agents
-        }
 
         # initializing action mapping and mask
         self.action_mapping = {}
@@ -887,11 +880,15 @@ class SplendorEnv(AECEnv):
             case _:
                 raise gym.error.InvalidAction(f"Action {action} is ill-defined!")
 
+    # lru_cache allows observation and action spaces to be memoized, reducing clock cycles required to get each agent's space.
+    # If your spaces change over time, remove this line (disable caching).
+    @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
-        return self.observation_spaces[agent]
+        return self.single_observation_space
 
+    @functools.lru_cache(maxsize=None)
     def action_space(self, agent):
-        return self.action_spaces[agent]
+        return spaces.Discrete(self.num_total_actions)
 
     def observe(self, agent):
         """
@@ -955,11 +952,17 @@ class SplendorEnv(AECEnv):
             )
         
         agent = self.agent_selection
+
+        # the agent which stepped last had its _cumulative_rewards accounted for
+        # (because it was returned by last()), so the _cumulative_rewards for this
+        # agent should start again at 0
+        # this is directly from the petting zoo documentation
+        self._cumulative_rewards[agent] = 0
+
         self.current_player = int(agent.split('_')[1])
         action_dict = self.action_mapping[action]
 
-        # Clear step-wise rewards
-        self.rewards = {a: 0 for a in self.agents}
+        self._clear_rewards()
 
         # ---------------------------------------------------------
         # 1. APPLY THE ACTION FIRST
@@ -1026,9 +1029,7 @@ class SplendorEnv(AECEnv):
             # DO NOT update self.agent_selection here.
             # Leaving it on the current agent triggers the dead step logic on the next call.
         else:
-            # ---------------------------------------------------------
-            # 3. ADVANCE TO NEXT PLAYER ONLY IF GAME CONTINUES
-            # ---------------------------------------------------------
+            # ADVANCE TO NEXT PLAYER ONLY IF GAME CONTINUES
             self.agent_selection = f"player_{next_player}"
              
         self._accumulate_rewards()

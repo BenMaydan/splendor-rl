@@ -270,6 +270,9 @@ def main():
     current_policy_container = [None] 
     shared_decision_counter = [args.initial_decisions] # Resume the internal game clock
 
+    # Variables needed from environment
+    PASS_ACTION_IDX = None
+
     TARGET_GAMMA = 0.98
 
     # Initialize Schedule (Assuming you want the pool to max out around the end of training)
@@ -277,11 +280,10 @@ def main():
         total_timesteps=args.total_timesteps,
         start_step=2_000_000
     )
-
-    # 1. Initialize Train Env
-    aec_env = SplendorEnv(num_players=4, render_mode="console")
     
     def make_env():
+        aec_env = SplendorEnv(num_players=4, render_mode="console")
+        PASS_ACTION_IDX = aec_env._action_indices_map["pass"][0]
         gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False)
         gym_env = Monitor(gym_env)
         return ActionMasker(gym_env, mask_fn)
@@ -301,11 +303,9 @@ def main():
             norm_reward=True,
             gamma=TARGET_GAMMA,
         )
-
-    # 2. Initialize Eval Env
-    eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
     
     def make_eval_env():
+        eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
         eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True)
         return ActionMasker(Monitor(eval_gym_env), mask_fn)
 
@@ -330,8 +330,7 @@ def main():
         render=False
     )
     
-    pass_action_idx = aec_env._action_indices_map["pass"][0] 
-    stats_callback = SplendorStatsCallback(pass_action_index=pass_action_idx, shared_decision_counter=shared_decision_counter)
+    stats_callback = SplendorStatsCallback(pass_action_index=PASS_ACTION_IDX, shared_decision_counter=shared_decision_counter)
     
     # Pass the shared counter and curriculum to the pool callback
     pool_callback = PolicyPoolCallback(shared_pool, current_policy_container, shared_decision_counter, save_freq=50_000, curriculum_schedule=curriculum, max_pool_size=10)
@@ -342,7 +341,7 @@ def main():
     lr_schedule = linear_schedule(3e-4)
 
     custom_policy_kwargs = dict(
-        net_arch=dict(pi=[256, 256, 256], vf=[256, 256, 256])
+        net_arch=dict(pi=[512, 512, 512], vf=[512, 512, 512])
     )
 
     # 4. Initialize or Load MaskablePPO
