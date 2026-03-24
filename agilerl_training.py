@@ -1,16 +1,97 @@
 import os
 import time
+import copy
+import random
 import numpy as np
 import torch
+import gymnasium as gym
 from gymnasium.spaces import Dict, utils
 from torch.utils.tensorboard import SummaryWriter
 
-# Import AgileRL components
 from agilerl.algorithms.ppo import PPO
-from agilerl.components.rollout_buffer import RolloutBuffer
 
-# Import your custom environment
 from env.splendor_env import SplendorEnv
+
+class AgileRLSelfPlayWrapper(gym.Env):
+    """
+    A single-agent wrapper that plays the opponents' turns automatically using
+    the current AgileRL PPO agent's policy. The external `.step()` only controls
+    the Learner agent.
+    """
+    def __init__(self, aec_env):
+        super().__init__()
+        self.env = aec_env
+        self.ppo_agent = None  # Must be set after PPO initialization
+        
+        representative_agent = self.env.possible_agents[0]
+        orig_obs_space = self.env.observation_space(representative_agent)
+        
+        self.base_obs_space = orig_obs_space["observation"]
+        flat_inner_obs_space = utils.flatten_space(self.base_obs_space)
+        
+        self.observation_space = Dict({
+            "observation": flat_inner_obs_space,
+            "action_mask": orig_obs_space["action_mask"]
+        })
+        self.action_space = self.env.action_space(representative_agent)
+        self.learner_agent = None
+
+    def _get_obs_and_mask(self):
+        obs, reward, terminated, truncated, info = self.env.last()
+        flat_inner_state = utils.flatten(self.base_obs_space, obs["observation"])
+        
+        flat_obs = {
+            "observation": flat_inner_state,
+            "action_mask": np.copy(obs["action_mask"])
+        }
+        return flat_obs, float(reward), terminated, truncated, info
+
+    def _advance_to_learner(self):
+        while self.env.agent_selection != self.learner_agent:
+            curr_agent = self.env.agent_selection
+            
+            if self.env.terminations[curr_agent] or self.env.truncations[curr_agent]:
+                self.env.step(None)
+                if not self.env.agents:
+                    break
+                continue
+                
+            obs, _, _, _, _ = self._get_obs_and_mask()
+            
+            if self.ppo_agent is not None:
+                # Format to batch dimension for AgileRL
+                batched_state = {
+                    "observation": np.expand_dims(obs["observation"], axis=0),
+                    "action_mask": np.expand_dims(obs["action_mask"], axis=0).astype(bool)
+                }
+                action, _, _, _ = self.ppo_agent.get_action(batched_state, action_mask=batched_state["action_mask"])
+                if isinstance(action, np.ndarray):
+                    action = int(action[0])
+            else:
+                valid_actions = np.where(obs["action_mask"])[0]
+                action = np.random.choice(valid_actions) if len(valid_actions) > 0 else 0
+                
+            self.env.step(action)
+            
+        if self.env.agent_selection == self.learner_agent:
+            obs, reward, term, trunc, info = self._get_obs_and_mask()
+        else:
+            obs = self.observation_space.sample()
+            reward, term, trunc, info = 0.0, True, False, {}
+            
+        return obs, float(reward), term, trunc, info
+
+    def reset(self, seed=None, options=None):
+        self.env.reset(seed=seed, options=options)
+        self.learner_agent = random.choice(self.env.possible_agents)
+        obs, _, _, _, info = self._advance_to_learner()
+        return obs, info
+
+    def step(self, action):
+        self.env.step(action)
+        obs, reward, term, trunc, info = self._advance_to_learner()
+        return obs, float(reward), term, trunc, info
+
 
 def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint_episodes=None, checkpoint_dir="checkpoints"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -19,35 +100,25 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
     writer = SummaryWriter(log_dir="runs/splendor_ppo")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # 1. Initialize the Splendor Environment
+    # 1. Initialize the AEC Splendor Environment & Gym Wrapper
     env = SplendorEnv(num_players=4)
-    env.reset()
-
-    # 2. Extract and create a hybrid space for AgileRL
-    dummy_agent = env.possible_agents[0]
-    full_space = env.observation_space(dummy_agent)
+    gym_env = AgileRLSelfPlayWrapper(env)
     
-    # Isolate the inner dictionary and flatten it
-    base_obs_space = full_space["observation"]
-    flat_inner_obs_space = utils.flatten_space(base_obs_space)
-    
-    # Construct the top-level Dict space AgileRL requires
-    agilerl_obs_space = Dict({
-        "observation": flat_inner_obs_space,
-        "action_mask": full_space["action_mask"]
-    })
-    action_space = env.action_space(dummy_agent)
+    agilerl_obs_space = gym_env.observation_space
+    action_space = gym_env.action_space
 
-    # 3. Initialize AgileRL PPO Agent
+    # 2. Initialize AgileRL PPO Agent (WITH rollout buffer)
+    update_steps = 2048
+    
     ppo_agent = PPO(
         observation_space=agilerl_obs_space,
         action_space=action_space,
         device=device,
         net_config={
             "encoder_config": {
-                "latent_dim": 256, # The output dimension of the multi-input encoder
-                "max_latent_dim": 256,
-                "mlp_config": {"hidden_size": [256, 256]} # The hidden layers for your vector data
+                "latent_dim": 256,
+                "max_latent_dim": 512,
+                "mlp_config": {"hidden_size": [256, 256]}
             }, 
             "head_config": {
                 "hidden_size": [256] 
@@ -55,20 +126,14 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
         },
         batch_size=256,
         ent_coef=0.02,
-        update_epochs=8
-    )
-
-    update_steps = 2048
-
-    # Initialize RolloutBuffer with the hybrid space
-    buffer = RolloutBuffer(
-        capacity=update_steps,
-        observation_space=agilerl_obs_space,
-        action_space=action_space,
-        num_envs=1,
-        device=device
+        update_epochs=8,
+        learn_step=update_steps,
+        use_rollout_buffer=True, # USE THE NATIVE INTERNAL BUFFER
     )
     
+    # 3. Connect the wrapper's opponent policy to the new PPO agent
+    gym_env.ppo_agent = ppo_agent
+
     total_steps = 0
     episode = 0
     start_time = time.time()
@@ -86,83 +151,66 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 print(f"Reached max episodes of {max_episodes}. Stopping.")
                 break
 
-            env.reset()
-            last_step_data = {a: None for a in env.possible_agents}
-            episode_rewards = {a: 0.0 for a in env.possible_agents}
-            
-            for agent_id in env.agent_iter():
-                observation, reward, termination, truncation, info = env.last()
-                done = int(termination or truncation)
-                
-                # Extract the nested structures
-                raw_inner_obs = observation["observation"]
-                mask = observation["action_mask"]
-                
-                # Flatten ONLY the inner dictionary
-                flat_inner_state = utils.flatten(base_obs_space, raw_inner_obs)
-                
-                # Construct the batched dictionary without nesting
+            obs, info = gym_env.reset()
+            done = False
+            episode_reward = 0.0
+
+            while not done:
+                # Format obs for AgileRL
                 batched_state = {
-                    "observation": np.expand_dims(flat_inner_state, axis=0),
-                    "action_mask": np.expand_dims(mask, axis=0).astype(bool)
+                    "observation": np.expand_dims(obs["observation"], axis=0),
+                    "action_mask": np.expand_dims(obs["action_mask"], axis=0).astype(bool)
                 }
+
+                # Get action from PPO
+                action, log_prob, _, value = ppo_agent.get_action(batched_state, action_mask=batched_state["action_mask"])
+                scalar_action = int(action[0]) if isinstance(action, np.ndarray) else action
                 
-                # Complete transition and add to AgileRL buffer
-                if last_step_data[agent_id] is not None:
-                    prev_batched_s, prev_a, prev_lp, prev_v = last_step_data[agent_id]
+                # Step the Gym environment (advances Learner AND Opponents)
+                next_obs, reward, term, trunc, info = gym_env.step(scalar_action)
+                done = term or trunc
+
+                # Save the ONE contiguous transition directly to the internal buffer
+                ppo_agent.rollout_buffer.add(
+                    obs=batched_state,
+                    action=np.array([scalar_action]),
+                    reward=np.array([reward]),
+                    done=np.array([done]),
+                    value=value,
+                    log_prob=log_prob,
+                    action_mask=batched_state["action_mask"]
+                )
+
+                obs = next_obs
+                episode_reward += reward
+                total_steps += 1
+
+                # Train the network when the native buffer reaches capacity
+                if ppo_agent.rollout_buffer.size() >= update_steps:
+                    # 1. We must bootstrap the final value before computing advantages
+                    # Grab value of the final state
+                    next_batched_state = {
+                        "observation": np.expand_dims(obs["observation"], axis=0),
+                        "action_mask": np.expand_dims(obs["action_mask"], axis=0).astype(bool)
+                    }
+                    _, _, _, next_value = ppo_agent.get_action(next_batched_state, action_mask=next_batched_state["action_mask"])
                     
-                    buffer.add(
-                        obs=prev_batched_s,
-                        action=np.array([prev_a]),
-                        reward=np.array([reward]),
-                        done=np.array([done]),
-                        value=np.array([prev_v]),
-                        log_prob=np.array([prev_lp])
+                    # 2. Tell the buffer to calculate advantages
+                    ppo_agent.rollout_buffer.compute_returns_and_advantages(
+                        last_value=next_value,
+                        last_done=np.array([done])
                     )
-                    episode_rewards[agent_id] += reward
+
+                    # 3. Call `.learn()` natively
+                    loss = ppo_agent.learn()
                     
-                if done:
-                    action = None
-                else:
-                    action, log_prob, _, value = ppo_agent.get_action(batched_state, action_mask=batched_state["action_mask"])
-                    
-                    if isinstance(action, np.ndarray):
-                        action = int(action[0])
-                        
-                    last_step_data[agent_id] = (batched_state, action, log_prob, value)
-                    total_steps += 1
-                    
-                env.step(action)
-                
-                # Train the network when the AgileRL buffer is full
-                if buffer.size() >= update_steps:
-                    # 1. Get the dictionary from the buffer
-                    exp_dict = buffer.get()
-                    
-                    # 2. Manually construct the 8-item tuple using your exact dictionary keys:
-                    # Order: (states, actions, log_probs, rewards, dones, values, next_states, next_dones)
-                    experiences_tuple = (
-                        exp_dict['observations'],
-                        exp_dict['actions'],
-                        exp_dict['log_probs'],
-                        exp_dict['rewards'],
-                        exp_dict['dones'],
-                        exp_dict['values'],
-                        batched_state,            # Use current batched dict as next_state
-                        np.array([done])          # Use current done as next_done
-                    )
-                    
-                    # 3. Pass the tuple to learn()
-                    loss = ppo_agent.learn(experiences_tuple)
-                    
-                    # 4. Reset the buffer
-                    buffer.reset()
+                    # 4. Empty the buffer once trained
+                    ppo_agent.rollout_buffer.reset()
 
             # Logging and Checkpointing
             if (episode + 1) % 10 == 0:
-                avg_reward = sum(episode_rewards.values()) / env.num_players
-                print(f"Episode: {episode + 1} | Total Steps: {total_steps} | Avg Reward: {avg_reward:.2f}")
-                writer.add_scalar("Training/Average_Reward", avg_reward, episode + 1)
+                print(f"Episode: {episode + 1} | Total Steps: {total_steps} | Episodic Reward: {episode_reward:.2f}")
+                writer.add_scalar("Training/Episodic_Reward", episode_reward, episode + 1)
                 writer.add_scalar("Training/Total_Steps", total_steps, episode + 1)
 
             current_time = time.time()
@@ -188,8 +236,7 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
 
 if __name__ == "__main__":
     train(
-        max_episodes=1_000_000,
-        # max_hours=12.0, 
+        max_episodes=20_000_000,
         checkpoint_minutes=30.0, 
-        checkpoint_episodes=2_000
+        checkpoint_episodes=100_000
     )
