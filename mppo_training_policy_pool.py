@@ -5,13 +5,15 @@ import random
 import copy
 import os
 import glob
+import multiprocessing
 
 from stable_baselines3.common.monitor import Monitor
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CallbackList, BaseCallback, CheckpointCallback
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
+from sb3_contrib.ppo_mask.policies import MaskableMultiInputActorCriticPolicy
 
 # Import your custom environment here
 from env.splendor_env import SplendorEnv
@@ -46,7 +48,7 @@ class SelfPlayPoolWrapper(gym.Env):
     A single-agent wrapper that assigns one agent as the 'Learner' and uses 
     a shared pool of historical policies to control the opponents.
     """
-    def __init__(self, aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=None, is_eval=False):
+    def __init__(self, aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=None, is_eval=False, policy_kwargs=None):
         super().__init__()
         self.env = aec_env
         self.shared_pool = shared_pool
@@ -67,6 +69,48 @@ class SelfPlayPoolWrapper(gym.Env):
         
         self.learner_agent = None
         self.opponent_policies = {}
+
+        # Local copies of policies to avoid passing entire SB3 models over IPC
+        self.local_shared_pool = []
+        self.local_current_policy = None
+        
+        if policy_kwargs is not None:
+            self.policy_template = MaskableMultiInputActorCriticPolicy(
+                self.observation_space,
+                self.action_space,
+                lambda x: 0.0,
+                **policy_kwargs
+            )
+            self.policy_template.eval()
+            for param in self.policy_template.parameters():
+                param.requires_grad = False
+        else:
+            self.policy_template = None
+
+    def update_policies(self, shared_pool_states, current_policy_state):
+        if self.policy_template is None:
+            return
+
+        if current_policy_state is not None:
+            if self.local_current_policy is None:
+                self.local_current_policy = copy.deepcopy(self.policy_template)
+            self.local_current_policy.load_state_dict(current_policy_state)
+
+        while len(self.local_shared_pool) < len(shared_pool_states):
+            self.local_shared_pool.append(copy.deepcopy(self.policy_template))
+        while len(self.local_shared_pool) > len(shared_pool_states):
+            self.local_shared_pool.pop()
+            
+        for policy_obj, state in zip(self.local_shared_pool, shared_pool_states):
+            policy_obj.load_state_dict(state)
+
+    def get_eval_or_local_pool(self):
+        if self.is_eval: return self.shared_pool
+        return self.local_shared_pool if self.policy_template is not None else self.shared_pool
+
+    def get_eval_or_local_current(self):
+        if self.is_eval: return self.current_policy_container[0]
+        return self.local_current_policy if self.policy_template is not None else self.current_policy_container[0]
 
     def _get_obs_and_mask(self):
         """Helper to get current agent's observation and mask."""
@@ -96,8 +140,10 @@ class SelfPlayPoolWrapper(gym.Env):
             # Decide opponent action
             if policy is not None:
                 # Track if the opponent is using the latest policy
-                if not self.is_eval and policy == self.current_policy_container[0]:
-                    self.shared_decision_counter[0] += 1
+                actual_current = self.get_eval_or_local_current()
+                if not self.is_eval and policy == actual_current:
+                    with self.shared_decision_counter.get_lock():
+                        self.shared_decision_counter.value += 1
 
                 action, _ = policy.predict(flat_obs, action_masks=flat_obs["action_mask"], deterministic=False)
                 if isinstance(action, np.ndarray):
@@ -128,26 +174,29 @@ class SelfPlayPoolWrapper(gym.Env):
         # Get the current weight from the schedule
         if self.curriculum_schedule and not self.is_eval:
             # Sync schedule with the true number of decisions made
-            pool_weight = self.curriculum_schedule.get_pool_weight(self.shared_decision_counter[0])
+            pool_weight = self.curriculum_schedule.get_pool_weight(self.shared_decision_counter.value)
         else:
             pool_weight = 1.0 if self.is_eval else 0.5 # Default behavior with no curriculum schedule
         
+        actual_shared_pool = self.get_eval_or_local_pool()
+        actual_current_policy = self.get_eval_or_local_current()
+
         # Assign policies to opponents for this match
         self.opponent_policies = {}
         for agent in self.env.possible_agents:
             if agent != self.learner_agent:
                 if self.is_eval:
                     # In eval, always test against historical models if available
-                    if self.shared_pool:
-                        self.opponent_policies[agent] = random.choice(self.shared_pool)
+                    if actual_shared_pool:
+                        self.opponent_policies[agent] = random.choice(actual_shared_pool)
                     else:
-                        self.opponent_policies[agent] = self.current_policy_container[0]
+                        self.opponent_policies[agent] = actual_current_policy
                 else:
                     # Use the scheduled weight to decide Pool vs. Latest
-                    if self.shared_pool and random.random() < pool_weight:
-                        self.opponent_policies[agent] = random.choice(self.shared_pool)
+                    if actual_shared_pool and random.random() < pool_weight:
+                        self.opponent_policies[agent] = random.choice(actual_shared_pool)
                     else:
-                        self.opponent_policies[agent] = self.current_policy_container[0]
+                        self.opponent_policies[agent] = actual_current_policy
         
         obs, reward, term, trunc, info = self._advance_to_learner()
         return obs, info
@@ -155,7 +204,8 @@ class SelfPlayPoolWrapper(gym.Env):
     def step(self, action):
         # The Learner always uses the latest policy, so we track its decision
         if not self.is_eval:
-            self.shared_decision_counter[0] += 1
+            with self.shared_decision_counter.get_lock():
+                self.shared_decision_counter.value += 1
 
         # Execute the Learner's action
         self.env.step(action)
@@ -168,6 +218,33 @@ class SelfPlayPoolWrapper(gym.Env):
     def action_masks(self) -> np.ndarray:
         obs, _, _, _, _ = self.env.last()
         return np.copy(obs["action_mask"])
+
+
+class SyncPoliciesCallback(BaseCallback):
+    """Synchronizes the shared_pool and current_policy from the main process to worker processes."""
+    def __init__(self, shared_pool, current_policy_container, verbose=0):
+        super().__init__(verbose)
+        self.shared_pool = shared_pool
+        self.current_policy_container = current_policy_container
+
+    def _on_rollout_start(self):
+        # Push the updated lists to all sub-environments
+        if hasattr(self.training_env, 'env_method'):
+            current_policy = self.current_policy_container[0]
+            if current_policy is not None:
+                current_sd = {k: v.cpu() for k, v in current_policy.state_dict().items()}
+            else:
+                current_sd = None
+                
+            pool_sds = []
+            for p in self.shared_pool:
+                pool_sds.append({k: v.cpu() for k, v in p.state_dict().items()})
+                
+            self.training_env.env_method("update_policies", pool_sds, current_sd)
+        return True
+
+    def _on_step(self):
+        return True
 
 
 class PolicyPoolCallback(BaseCallback):
@@ -191,8 +268,17 @@ class PolicyPoolCallback(BaseCallback):
         
         # We still save every N 'n_calls' (SB3 steps) for stability, 
         # but we gate the start of the saving based on the actual true decisions.
-        if self.n_calls % self.save_freq == 0 and self.shared_decision_counter[0] >= start_steps:
-            historical_policy = copy.deepcopy(self.model.policy)
+        if self.n_calls % self.save_freq == 0 and self.shared_decision_counter.value >= start_steps:
+            historical_policy = MaskableMultiInputActorCriticPolicy(
+                self.model.observation_space,
+                self.model.action_space,
+                lambda x: 0.0,
+                **self.model.policy_kwargs
+            )
+            historical_policy.load_state_dict({k: v.cpu() for k, v in self.model.policy.state_dict().items()})
+            historical_policy.eval()
+            for param in historical_policy.parameters():
+                param.requires_grad = False
             
             self.shared_pool.append(historical_policy)
             if len(self.shared_pool) > self.max_pool_size:
@@ -236,7 +322,7 @@ class SplendorStatsCallback(BaseCallback):
                         self.logger.record("rates/win_rate", win_rate)
                         self.logger.record("rates/deadlock_rate", deadlock_rate)
 
-        self.logger.record("stats/total_actions_taken", self.shared_decision_counter[0])
+        self.logger.record("stats/total_actions_taken", self.shared_decision_counter.value)
         self.logger.record("stats/cumulative_pass_actions", self.pass_count)
         return True
 
@@ -263,17 +349,38 @@ def main():
                         help="The number of decisions already made, to correctly resume the curriculum schedule.")
     parser.add_argument("--total-timesteps", type=int, default=20_000_000, 
                         help="Total timesteps for this training run.")
+    
+    # New hardware and PPO tuning arguments
+    # 8 is the number of physical P-cores (performance cores).
+    # This ensures every env gets a high-performance lane.
+    parser.add_argument("--num-envs", type=int, default=8,
+                        help="Number of parallel environments (Recommend 8 for i9-14900KF P-cores)")
+    
+    parser.add_argument("--n-steps", type=int, default=4096,
+                        help="Number of steps to run for each environment per update.")
+    
+    parser.add_argument("--batch-size", type=int, default=4096,
+                        help="Minibatch size for the optimizer.")
+    
+    parser.add_argument("--n-epochs", type=int, default=10,
+                        help="Number of epochs when optimizing the surrogate loss.")
+
     args = parser.parse_args()
 
     # --- Shared Memory for Pool ---
     shared_pool = []
     current_policy_container = [None] 
-    shared_decision_counter = [args.initial_decisions] # Resume the internal game clock
+    shared_decision_counter = multiprocessing.Value('i', args.initial_decisions) # Resume the internal game clock
 
     # Variables needed from environment
-    PASS_ACTION_IDX = None
+    temp_env = SplendorEnv(num_players=4, render_mode=None)
+    PASS_ACTION_IDX = temp_env._action_indices_map["pass"][0]
 
     TARGET_GAMMA = 0.98
+
+    custom_policy_kwargs = dict(
+        net_arch=dict(pi=[512, 512, 512], vf=[512, 512, 512])
+    )
 
     # Initialize Schedule (Assuming you want the pool to max out around the end of training)
     curriculum = CurriculumSchedule(
@@ -281,14 +388,15 @@ def main():
         start_step=2_000_000
     )
     
-    def make_env():
-        aec_env = SplendorEnv(num_players=4, render_mode="console")
-        PASS_ACTION_IDX = aec_env._action_indices_map["pass"][0]
-        gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False)
-        gym_env = Monitor(gym_env)
-        return ActionMasker(gym_env, mask_fn)
+    def make_env_fn(rank: int):
+        def _init():
+            aec_env = SplendorEnv(num_players=4, render_mode="console" if rank == 0 else None)
+            gym_env = SelfPlayPoolWrapper(aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=False, policy_kwargs=custom_policy_kwargs)
+            gym_env = Monitor(gym_env)
+            return ActionMasker(gym_env, mask_fn)
+        return _init
 
-    venv = DummyVecEnv([make_env])
+    venv = SubprocVecEnv([make_env_fn(i) for i in range(args.num_envs)])
     
     vec_norm_path = os.path.join(os.path.dirname(args.checkpoint), "vec_normalize.pkl") if args.checkpoint else None
     if vec_norm_path and os.path.exists(vec_norm_path):
@@ -306,7 +414,7 @@ def main():
     
     def make_eval_env():
         eval_aec_env = SplendorEnv(num_players=4, render_mode=None)
-        eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True)
+        eval_gym_env = SelfPlayPoolWrapper(eval_aec_env, shared_pool, current_policy_container, shared_decision_counter, curriculum_schedule=curriculum, is_eval=True, policy_kwargs=custom_policy_kwargs)
         return ActionMasker(Monitor(eval_gym_env), mask_fn)
 
     eval_venv = DummyVecEnv([make_eval_env])
@@ -334,15 +442,12 @@ def main():
     
     # Pass the shared counter and curriculum to the pool callback
     pool_callback = PolicyPoolCallback(shared_pool, current_policy_container, shared_decision_counter, save_freq=50_000, curriculum_schedule=curriculum, max_pool_size=10)
+    sync_callback = SyncPoliciesCallback(shared_pool, current_policy_container)
 
-    callback_list = CallbackList([eval_callback, stats_callback, pool_callback, checkpoint_callback])
+    callback_list = CallbackList([eval_callback, stats_callback, pool_callback, checkpoint_callback, sync_callback])
 
     # Calculate the new schedule
     lr_schedule = linear_schedule(3e-4)
-
-    custom_policy_kwargs = dict(
-        net_arch=dict(pi=[512, 512, 512], vf=[512, 512, 512])
-    )
 
     # 4. Initialize or Load MaskablePPO
     if args.checkpoint:
@@ -376,8 +481,11 @@ def main():
                 device="cpu",
                 custom_objects={"learning_rate": lr_schedule}
             )
-            temp_model.policy.eval()
-            shared_pool.append(temp_model)
+            temp_policy = temp_model.policy
+            temp_policy.eval()
+            for param in temp_policy.parameters():
+                param.requires_grad = False
+            shared_pool.append(temp_policy)
     else:
         print("Initializing MaskablePPO from scratch...")
         model = MaskablePPO(
@@ -386,9 +494,9 @@ def main():
             policy_kwargs=custom_policy_kwargs,
             gamma=TARGET_GAMMA,
             learning_rate=lr_schedule,
-            n_steps=32768,
-            batch_size=4096,
-            n_epochs=10,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
             ent_coef=0.2,
             seed=42,
             verbose=1,
