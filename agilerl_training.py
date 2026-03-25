@@ -66,8 +66,7 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
             use_rollout_buffer=True,
         )
         # Track episodic rewards for this specific agent manually
-        ppo_agent.fitness_history = []
-        ppo_agent.fitness = 0.0 # Default starting fitness
+        ppo_agent.fitness = [] # AgileRL expects a list
         pop.append(ppo_agent)
 
     tournament = TournamentSelection(
@@ -82,7 +81,7 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
         architecture=0.1,
         new_layer_prob=0.1,
         parameters=0.1,
-        activation=0.1,
+        activation=0.0, # disabled because it is unsupported for PPO
         rl_hp=0.1,
         mutation_sd=0.1,
         rand_seed=42,
@@ -90,6 +89,7 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
     )
     
     evo_steps = 10000
+    next_evo_step = evo_steps
 
     total_steps = 0
     episode = 0
@@ -182,8 +182,19 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 
                 # Accumulate the total reward for this individual's fitness score
                 ep_reward = sum(trajectories[env_agent]["reward"])
-                current_ppo_agent.fitness_history.append(ep_reward)
+                current_ppo_agent.fitness.append(ep_reward)
                 
+                # Check if adding this complete trajectory would overflow the buffer capacity
+                if current_ppo_agent.rollout_buffer.size() + traj_len > update_steps:
+                    if current_ppo_agent.rollout_buffer.size() > 0:
+                        # Since we just finished an episode, we know it ended in a terminal state
+                        current_ppo_agent.rollout_buffer.compute_returns_and_advantages(
+                            last_value=np.array([0.0]),
+                            last_done=np.array([True])
+                        )
+                        loss = current_ppo_agent.learn()
+                        current_ppo_agent.rollout_buffer.reset()
+
                 for t in range(traj_len):
                     current_ppo_agent.rollout_buffer.add(
                         obs=trajectories[env_agent]["obs"][t],
@@ -195,26 +206,6 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                         action_mask=trajectories[env_agent]["action_mask"][t]
                     )
 
-                    # Handled properly: what if the buffer perfectly caps out mid-sequence?
-                    if current_ppo_agent.rollout_buffer.size() == update_steps:
-                        # Grab the exact state values to bootstrap the boundary
-                        if t < traj_len - 1:
-                            # We are still in the middle of a continuous trajectory string, retrieve t+1 for bridging
-                            next_s = trajectories[env_agent]["obs"][t+1]
-                            _, _, _, next_v = current_ppo_agent.get_action(next_s, action_mask=next_s["action_mask"])
-                            last_done_flag = False
-                        else:
-                            # It organically coincided with the final state of the sequence
-                            next_v = np.array([0.0])
-                            last_done_flag = True
-                            
-                        current_ppo_agent.rollout_buffer.compute_returns_and_advantages(
-                            last_value=next_v,
-                            last_done=np.array([last_done_flag])
-                        )
-                        loss = current_ppo_agent.learn()
-                        current_ppo_agent.rollout_buffer.reset()
-
             # Episode ends
             if (episode + 1) % 10 == 0:
                 # episode_reward here represents the total combined rewards of all 4 agents
@@ -222,52 +213,48 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 print(f"Episode: {episode + 1} | Total Steps (across all agents): {total_steps} | Combined Env Reward: {episode_reward:.2f}")
                 writer.add_scalar("Training/Combined_Episodic_Reward", episode_reward, episode + 1)
                 writer.add_scalar("Training/Total_Steps", total_steps, episode + 1)
-                
+            
+            # Checkpoint the elite dynamically before potentially doing a reduction on the fitness buffer
+            current_time = time.time()
+            elapsed_minutes_since_ckpt = (current_time - last_checkpoint_time) / 60.0
+            if (checkpoint_minutes and elapsed_minutes_since_ckpt >= checkpoint_minutes) or (checkpoint_episodes and (episode + 1) % checkpoint_episodes == 0):
+                # Calculate mean on the fly to find the best agent without altering the actual fitness tracking
+                best_agent = max(pop, key=lambda x: np.mean(x.fitness) if len(x.fitness) > 0 else -1000)
+                ckpt_path = os.path.join(checkpoint_dir, f"ppo_elite_ep{episode+1}.pt")
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                best_agent.save_checkpoint(ckpt_path) 
+                last_checkpoint_time = current_time
+                print(f"--> Checkpoint saved to {ckpt_path}")
+
             # Evolution Step
-            if total_steps > 0 and total_steps % evo_steps == 0:
-                print(f"--- Evolution Step at {total_steps} steps ---")
+            if total_steps >= next_evo_step:
+                print(f"--- Evolution Step triggered at {total_steps} steps ---")
+                next_evo_step += evo_steps
                 
-                # Calculate mean fitness for each agent
-                fitnesses = []
+                # Condense the generation's noisy array of episodic rewards into a single stable mean
+                # so that TournamentSelection (with eval_loop=1) evaluates true generational average performance!
                 for p_agent in pop:
-                    if len(p_agent.fitness_history) > 0:
-                        fitness = np.mean(p_agent.fitness_history)
-                    else:
-                        fitness = 0.0 # Default baseline if they missed play
-                    fitnesses.append(fitness)
-                    p_agent.fitness = fitness # AgileRL uses this variable
-                
-                print(f"Population Fitnesses: {['%.2f' % f for f in fitnesses]}")
-                
+                    p_agent.fitness = [sum(p_agent.fitness) / len(p_agent.fitness)] if len(p_agent.fitness) > 0 else [-1000.0]
+
                 # Tournament Selection
-                survivors = tournament.select(pop)
+                elite, survivors = tournament.select(pop)
                 
                 # Mutation
                 pop = mutations.mutation(survivors)
                 
-                # Reset fitness histories for next generation
+                # State Clearing: Prevent off-policy buffer poisoning and reset generational fitness
                 for p_agent in pop:
-                    p_agent.fitness_history = []
-
-            current_time = time.time()
-            elapsed_minutes_since_ckpt = (current_time - last_checkpoint_time) / 60.0
-            
-            if (checkpoint_minutes and elapsed_minutes_since_ckpt >= checkpoint_minutes) or \
-               (checkpoint_episodes and (episode + 1) % checkpoint_episodes == 0):
-                # Save just the Elite agent
-                elite = max(pop, key=lambda x: x.fitness)
-                ckpt_path = os.path.join(checkpoint_dir, f"ppo_elite_ep{episode+1}_steps{total_steps}.pt")
-                elite.save_checkpoint(ckpt_path) 
-                last_checkpoint_time = current_time
-                print(f"--> Checkpoint saved to {ckpt_path}")
+                    p_agent.rollout_buffer.reset()
+                    p_agent.fitness = []
 
             episode += 1
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user. Shutting down...")
     finally:
-        elite = max(pop, key=lambda x: x.fitness)
+        elite = max(pop, key=lambda x: np.mean(x.fitness) if len(x.fitness) > 0 else -1000)
         final_path = os.path.join(checkpoint_dir, "ppo_elite_final.pt")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         elite.save_checkpoint(final_path)
         print(f"Final elite model saved to {final_path}")
         writer.flush()
@@ -276,6 +263,6 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
 if __name__ == "__main__":
     train(
         max_episodes=20_000_000,
-        checkpoint_minutes=30.0, 
-        checkpoint_episodes=100_000
+        checkpoint_minutes=10.0, 
+        checkpoint_episodes=1_000
     )
