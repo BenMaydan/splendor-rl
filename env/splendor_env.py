@@ -143,7 +143,7 @@ class SplendorEnv(AECEnv):
         self.num_dealt_at_tier = None
 
         # the purchasability map is (num_players, num_tiers, num_slots)
-        purchasability_shape = (self.num_players, self.num_tiers, self.num_slots)
+        purchasability_shape = (self.max_num_players, self.num_tiers, self.num_slots)
 
         # setting observation limits about the dealt tensor
         dealt_shape = (self.num_tiers, self.num_slots, self.card_num_columns)
@@ -155,13 +155,13 @@ class SplendorEnv(AECEnv):
 
         self.max_able_to_reserve = 3
         self.max_tokens_allowed = 10
-        self.points = np.zeros((self.num_players,), dtype=np.int8)
-        self.reserved = np.zeros((self.num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
-        self.num_reserved = np.zeros((self.num_players,), dtype=np.uint8)
-        self.num_cards_in_hand = np.zeros((self.num_players,), dtype=np.uint8)
-        self.discounts = np.zeros((self.num_players, len(self.colors)), dtype=np.int8)
+        self.points = np.zeros((self.max_num_players,), dtype=np.int8)
+        self.reserved = np.zeros((self.max_num_players, self.max_able_to_reserve, self.card_num_columns), dtype=np.uint8)
+        self.num_reserved = np.zeros((self.max_num_players,), dtype=np.uint8)
+        self.num_cards_in_hand = np.zeros((self.max_num_players,), dtype=np.uint8)
+        self.discounts = np.zeros((self.max_num_players, len(self.colors)), dtype=np.int8)
         self.tokens_remaining = np.zeros((1 + len(self.colors),), dtype=np.uint8)
-        self.tokens_in_hand = np.zeros((self.num_players, 1 + len(self.colors)), dtype=np.int8)
+        self.tokens_in_hand = np.zeros((self.max_num_players, 1 + len(self.colors)), dtype=np.int8)
 
         self.num_nobles_points = 3
         self.nobles_columns = ['available'] + self.colors
@@ -461,7 +461,7 @@ class SplendorEnv(AECEnv):
             action_idx += 1
         
         # Action 9: Pick a noble if you can
-        for index in range(self.num_nobles_available):
+        for index in range(self.max_num_nobles):
             self.action_mapping[action_idx] = {
                 "type": "pick_noble",
                 "index": index,
@@ -650,13 +650,13 @@ class SplendorEnv(AECEnv):
         assert tokens_in_hand.ndim in [1, 2], "tokens_in_hand must be 1D (single player) or 2D (multi-player)"
         assert tokens_in_hand.shape[-1] == NUM_COLORS + 1, f"tokens_in_hand last dim must be {NUM_COLORS + 1} (colors + gold)"
         if tokens_in_hand.ndim == 2:
-            assert tokens_in_hand.shape[0] == self.num_players, f"tokens_in_hand dim 0 must be {self.num_players}"
+            assert tokens_in_hand.shape[0] == self.max_num_players, f"tokens_in_hand dim 0 must be {self.max_num_players}"
 
         # 2. discounts checks
         assert discounts.ndim in [1, 2], "discounts must be 1D (single player) or 2D (multi-player)"
         assert discounts.shape[-1] == NUM_COLORS, f"discounts last dim must be {NUM_COLORS}"
         if discounts.ndim == 2:
-            assert discounts.shape[0] == self.num_players, f"discounts dim 0 must be {self.num_players}"
+            assert discounts.shape[0] == self.max_num_players, f"discounts dim 0 must be {self.max_num_players}"
             
         # 3. cards checks
         assert cards.ndim >= 1, "cards must have at least 1 dimension (card features)"
@@ -902,7 +902,7 @@ class SplendorEnv(AECEnv):
         observation = {
             "observation": {
                 "phase": self.phases.index(self.current_phase),
-                "relative_player_seat": np.array([(player_idx + self.num_players - self.starting_player) % 4], dtype=np.uint8),
+                "relative_player_seat": np.array([(player_idx + self.num_players - self.starting_player) % self.num_players], dtype=np.uint8),
 
                 "tier_1_remaining": np.array([self._max_num_cards_at_tier[0] - self.num_dealt_at_tier[0]], dtype=np.uint8),
                 "tier_2_remaining": np.array([self._max_num_cards_at_tier[1] - self.num_dealt_at_tier[1]], dtype=np.uint8),
