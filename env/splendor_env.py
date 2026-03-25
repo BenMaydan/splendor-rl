@@ -897,6 +897,20 @@ class SplendorEnv(AECEnv):
         # Extract the integer index from the agent string (e.g., "player_0" -> 0)
         player_idx = int(agent.split('_')[1])
         
+        # Calculate the shift required to move this player's data to index 0
+        shift = -player_idx
+        
+        # Roll all player-specific arrays along the player dimension (axis 0)
+        ego_points = np.roll(self.points, shift, axis=0)
+        ego_reserved = np.roll(self.reserved, shift, axis=0)
+        ego_discounts = np.roll(self.discounts, shift, axis=0)
+        ego_num_cards_in_hand = np.roll(self.num_cards_in_hand, shift, axis=0)
+        ego_tokens_in_hand = np.roll(self.tokens_in_hand, shift, axis=0)
+
+        # Compute purchasability using the ego-centric arrays
+        # The agent now has a boolean map of exactly what IT can afford at index 0
+        ego_purchasability = self.get_purchasability_map(ego_tokens_in_hand, ego_discounts, self.dealt)
+        
         # Generate the new observation state
         # Notice we use player_idx to structure the perspective
         observation = {
@@ -910,16 +924,16 @@ class SplendorEnv(AECEnv):
                 "nobles_remaining": np.array([self.num_nobles_available], dtype=np.uint8),
                 "tokens_remaining": self.tokens_remaining,
 
-                "purchasability": self.get_purchasability_map(self.tokens_in_hand, self.discounts, self.dealt),
+                "purchasability": ego_purchasability,
                 
                 "dealt": self.dealt,
                 "nobles": self.nobles,
                 
-                "points": self.points,
-                "reserved": self.reserved,
-                "discounts": self.discounts,
-                "num_cards_in_hand": self.num_cards_in_hand,
-                "tokens_in_hand": self.tokens_in_hand
+                "points": ego_points,
+                "reserved": ego_reserved,
+                "discounts": ego_discounts,
+                "num_cards_in_hand": ego_num_cards_in_hand,
+                "tokens_in_hand": ego_tokens_in_hand
             },
             
             # The mask must reflect the current state.
