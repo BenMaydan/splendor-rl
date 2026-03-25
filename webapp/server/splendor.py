@@ -11,6 +11,14 @@ import platform
 import sys
 import uuid
 import glob
+import re
+import numpy as np
+from gymnasium.spaces import utils
+import torch
+from agilerl.algorithms.ppo import PPO
+from gymnasium.spaces import utils, Dict
+from env_adapter import SplendorEnvAdapter
+
 
 app = Flask(__name__)
 game_map = {}
@@ -63,7 +71,7 @@ class PreGame:
                 p['name'] = name
 
 class GameManager(object):
-    def __init__(self, name, num_ais=0, checkpoint="splendor_ppo_mask.zip"):
+    def __init__(self, name, num_ais=0, checkpoint="", inference_engine="agilerl"):
         global game_map
 
         self.uuid = name
@@ -80,12 +88,13 @@ class GameManager(object):
         
         self.num_ais = num_ais
         self.checkpoint = checkpoint
+        self.inference_engine = inference_engine
         self.ai_model = None
 
     def check_ai_turn(self):
         if not self.started:
             return
-        if self.game.env.terminations[self.game.env.agents[0]] or self.game.env.truncations[self.game.env.agents[0]]:
+        if all(self.game.env.terminations.values()) or all(self.game.env.truncations.values()):
             return
             
         active_idx = self.game.env.current_player
@@ -94,11 +103,30 @@ class GameManager(object):
         if active_name.startswith("AI Model"):
             # Execute AI action with matching flat observation format
             raw_obs = self.game.env.observe(f"player_{active_idx}")
-            flat_obs = {k: v for k, v in raw_obs["observation"].items()}
-            flat_obs["action_mask"] = raw_obs["action_mask"]
             
-            action, _states = self.ai_model.predict(flat_obs, action_masks=flat_obs["action_mask"], deterministic=True)
-            self.game._execute_action_idx(action.item())
+            if getattr(self, 'inference_engine', 'sb3') == 'agilerl':
+                base_obs_space = self.game.env.observation_space(f"player_{active_idx}")["observation"]
+                flat_inner_state = utils.flatten(base_obs_space, raw_obs["observation"])
+                batched_state = {
+                    "observation": np.expand_dims(flat_inner_state, axis=0),
+                    "action_mask": np.expand_dims(raw_obs["action_mask"], axis=0).astype(bool)
+                }
+                
+                action, _, _, _ = self.ai_model.get_action(
+                    batched_state, 
+                    action_mask=batched_state["action_mask"],
+                )
+                
+                if isinstance(action, np.ndarray):
+                    action = int(action[0])
+                self.game._execute_action_idx(action)
+            else:
+                flat_obs = {k: v for k, v in raw_obs["observation"].items()}
+                flat_obs["action_mask"] = raw_obs["action_mask"]
+                
+                action, _states = self.ai_model.predict(flat_obs, action_masks=flat_obs["action_mask"], deterministic=True)
+                self.game._execute_action_idx(action.item())
+                
             self.has_changed()
 
     def dict(self):
@@ -152,7 +180,7 @@ class GameManager(object):
     def has_changed(self):
         global game_map
 
-        if hasattr(self.game, 'env') and (self.game.env.terminations[self.game.env.agents[0]] or self.game.env.truncations[self.game.env.agents[0]]):
+        if hasattr(self.game, 'env') and (all(self.game.env.terminations.values()) or all(self.game.env.truncations.values())):
             for pid in self.ended:
                 self.ended[pid] = True
         for p in self.changed:
@@ -191,7 +219,41 @@ class GameManager(object):
             checkpoint_path = os.path.join(splendor_dir, self.checkpoint)
             if not os.path.exists(checkpoint_path):
                 return {'error': f'Checkpoint {self.checkpoint} not found at {checkpoint_path}'}
-            self.ai_model = MaskablePPO.load(checkpoint_path)
+                
+            if getattr(self, 'inference_engine', 'sb3') == 'agilerl' and self.checkpoint.endswith('.pt'):
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                
+                # Use a dummy env to get action and observation spaces
+                old_game = self.game
+                temp_env = SplendorEnvAdapter(old_game.num_players)
+                dummy_agent = temp_env.env.possible_agents[0]
+                orig_obs_space = temp_env.env.observation_space(dummy_agent)
+                base_obs_space = orig_obs_space["observation"]
+                flat_obs_space = utils.flatten_space(base_obs_space)
+                
+                agilerl_obs_space = Dict({
+                    "observation": flat_obs_space,
+                    "action_mask": orig_obs_space["action_mask"]
+                })
+                
+                action_space = temp_env.env.action_space(dummy_agent)
+                
+                self.ai_model = PPO(
+                    observation_space=agilerl_obs_space,
+                    action_space=action_space,
+                    device=device,
+                    net_config={
+                        "encoder_config": {
+                            "latent_dim": 256,
+                            "max_latent_dim": 512,
+                            "mlp_config": {"hidden_size": [256, 256]}
+                        }, 
+                        "head_config": {"hidden_size": [256]} 
+                    }
+                )
+                self.ai_model.load_checkpoint(checkpoint_path)
+            else:
+                self.ai_model = MaskablePPO.load(checkpoint_path)
             
         old_game = self.game
         self.game = SplendorEnvAdapter(old_game.num_players)
@@ -236,9 +298,10 @@ def create_game(game):
         
     payload = request.get_json(silent=True) or {}
     num_ais = int(payload.get('numAIs', 0))
-    checkpoint = payload.get('checkpoint', 'splendor_ppo_mask.zip')
+    checkpoint = payload.get('checkpoint', '')
+    inference_engine = payload.get('inferenceEngine', 'agilerl')
     
-    new_game = GameManager(game, num_ais=num_ais, checkpoint=checkpoint)
+    new_game = GameManager(game, num_ais=num_ais, checkpoint=checkpoint, inference_engine=inference_engine)
     num_created += 1
     return {'game': new_game.uuid, 'start': new_game.starter, 'state': new_game.game.dict()}
 
@@ -357,11 +420,29 @@ def list_games():
 @app.route('/models', methods=['GET'])
 @json_response
 def list_models():
-    zip_files = glob.glob(os.path.join(splendor_dir, '**', '*.zip'), recursive=True)
+    files = []
+    files.extend(glob.glob(os.path.join(splendor_dir, '**', '*.zip'), recursive=True))
+    files.extend(glob.glob(os.path.join(splendor_dir, '**', '*.pt'), recursive=True))
     
+    dir_to_files = {}
+    for f in files:
+        dirname = os.path.dirname(f)
+        if dirname not in dir_to_files:
+            dir_to_files[dirname] = []
+        dir_to_files[dirname].append(f)
+        
     models = []
-    for f in zip_files:
-        rel_path = os.path.relpath(f, splendor_dir).replace('\\', '/')
+    
+    def get_end_number(filepath):
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        match = re.search(r'(\d+)$', basename)
+        if match:
+            return int(match.group(1))
+        return -1
+
+    for dirname, dir_files in dir_to_files.items():
+        best_file = max(dir_files, key=get_end_number)
+        rel_path = os.path.relpath(best_file, splendor_dir).replace('\\', '/')
         models.append(rel_path)
         
     return {'models': models}

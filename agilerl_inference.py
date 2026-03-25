@@ -3,6 +3,7 @@ import numpy as np
 from gymnasium.spaces import utils
 from agilerl.algorithms.ppo import PPO
 from env.splendor_env import SplendorEnv
+from gymnasium.spaces import Dict
 
 def play_against_ai(checkpoint_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -13,17 +14,28 @@ def play_against_ai(checkpoint_path):
     
     # 2. Setup Agent Space Logic
     dummy_agent = env.possible_agents[0]
-    base_obs_space = env.observation_space(dummy_agent)["observation"]
+    orig_obs_space = env.observation_space(dummy_agent)
+    base_obs_space = orig_obs_space["observation"]
     flat_obs_space = utils.flatten_space(base_obs_space)
+    
+    agilerl_obs_space = Dict({
+        "observation": flat_obs_space,
+        "action_mask": orig_obs_space["action_mask"]
+    })
+    
     action_space = env.action_space(dummy_agent)
 
     # 3. Load the Trained Agent
     ppo_agent = PPO(
-        observation_space=flat_obs_space,
+        observation_space=agilerl_obs_space,
         action_space=action_space,
         device=device,
         net_config={
-            "encoder_config": {"hidden_size": [256, 256, 256]}, 
+            "encoder_config": {
+                "latent_dim": 256,
+                "max_latent_dim": 512,
+                "mlp_config": {"hidden_size": [256, 256]}
+            }, 
             "head_config": {"hidden_size": [256]} 
         }
     )
@@ -63,12 +75,16 @@ def play_against_ai(checkpoint_path):
             # --- AI Turn ---
             raw_obs = observation["observation"]
             mask = observation["action_mask"]
-            flat_state = utils.flatten(base_obs_space, raw_obs)
+            flat_inner_state = utils.flatten(base_obs_space, raw_obs)
+            batched_state = {
+                "observation": np.expand_dims(flat_inner_state, axis=0),
+                "action_mask": np.expand_dims(mask, axis=0).astype(bool)
+            }
             
             # Use training=False to get the greedy (best) action
             action, _, _, _ = ppo_agent.get_action(
-                flat_state, 
-                action_mask=mask,
+                batched_state, 
+                action_mask=batched_state["action_mask"],
             )
             
             if isinstance(action, np.ndarray):

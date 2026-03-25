@@ -184,7 +184,7 @@ class SplendorEnvAdapter:
             state['players'].append(p_dict)
             
         # Determine winner if game is over
-        if self.env.terminations[self.env.agents[0]] or self.env.truncations[self.env.agents[0]]:
+        if all(self.env.terminations.values()) or all(self.env.truncations.values()):
             # Game over
             best_score = -1
             winner = 0

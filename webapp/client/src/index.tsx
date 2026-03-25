@@ -486,6 +486,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
         if (r.state.winner !== null && this.state.phase != "postgame") {
           alert(r.state.players[r.state.winner].name + " wins!");
           this.setState({phase: "postgame"});
+          window.location.href = "/";
         }
 
         if (r.chat) {
@@ -823,6 +824,7 @@ let globalShowError = (resp: ServerResponse) => { return false }
     error: string | null
     errorOpacity: number
     numAIs: number
+    inferenceEngine: string
     checkpoint: string
     availableModels: string[]
   }
@@ -840,7 +842,8 @@ let globalShowError = (resp: ServerResponse) => { return false }
       errorOpacity: 0,
       error: null,
       numAIs: 0,
-      checkpoint: 'splendor_ppo_mask.zip',
+      inferenceEngine: 'agilerl',
+      checkpoint: '',
       availableModels: [],
     } as GameCreatorState
 
@@ -905,7 +908,8 @@ let globalShowError = (resp: ServerResponse) => { return false }
       const gameName = this.state.gid === '' ? this.state.gameName : this.state.gid
       const payload = {
         numAIs: this.state.numAIs,
-        checkpoint: this.state.checkpoint
+        checkpoint: this.state.checkpoint,
+        inferenceEngine: this.state.inferenceEngine || 'agilerl'
       }
       const resp = await fetch(`/create/${gameName}`, { 
         method: "POST",
@@ -1015,6 +1019,13 @@ let globalShowError = (resp: ServerResponse) => { return false }
                 <option value={1}>1</option>
                 <option value={2}>2</option>
                 <option value={3}>3</option>
+              </select>
+            </div>
+            <div>
+              <label style={{marginRight: '10px'}}>Inference Engine: </label>
+              <select value={this.state.inferenceEngine} onChange={(e) => this.setState({inferenceEngine: e.target.value})}>
+                <option value="sb3">SB3 Contrib / MaskablePPO</option>
+                <option value="agilerl">AgileRL</option>
               </select>
             </div>
             <div>
