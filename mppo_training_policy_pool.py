@@ -484,7 +484,7 @@ def main():
             n_steps=args.n_steps,
             batch_size=args.batch_size,
             n_epochs=args.n_epochs,
-            ent_coef=0.2,
+            ent_coef=0.01,
             seed=42,
             verbose=1,
             tensorboard_log="./logs/tensorboard/"

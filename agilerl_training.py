@@ -1,28 +1,35 @@
+import argparse
 import os
 import time
-import copy
 import random
 import numpy as np
 import torch
-import gymnasium as gym
 from gymnasium.spaces import Dict, utils
 from torch.utils.tensorboard import SummaryWriter
 
 from agilerl.algorithms.ppo import PPO
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 
 from env.splendor_env import SplendorEnv
 
 
-def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint_episodes=None, checkpoint_dir="checkpoints"):
+def train(
+        max_episodes=1000,
+        max_hours=None,
+        checkpoint_minutes=None,
+        checkpoint_episodes=None,
+        checkpoint_dir="checkpoints",
+        load_path=None
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
 
     writer = SummaryWriter(log_dir="runs/splendor_ppo")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # 1. Initialize the AEC Splendor Environment
+    # Initialize the AEC Splendor Environment
     env = SplendorEnv(num_players=4)
     
     # Extract spaces for AgileRL
@@ -38,63 +45,91 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
     })
     action_space = env.action_space(representative_agent)
 
-    # 2. Initialize AgileRL PPO Population & HPO Setup
+    # Initialize AgileRL PPO Population & HPO Setup
     update_steps = 2048
-    POP_SIZE = 6
+    POP_SIZE = 16
+    EVO_STEPS = 25_000
+
+    net_config={
+        "encoder_config": {
+            "latent_dim": 256, 
+            "max_latent_dim": 512, 
+            # Start wider than ~400, then step down
+            "mlp_config": {"hidden_size": [512, 256]} 
+        }, 
+        "head_config": {
+            # A slightly deeper head for complex action evaluation
+            "hidden_size": [256, 128] 
+        } 
+    }
+
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-5, max=1e-3),
+        batch_size=RLParameter(min=64, max=512, dtype=int),
+        ent_coef=RLParameter(min=0.001, max=0.03),
+        gamma=RLParameter(min=0.90, max=0.999) # Allow evolution of the planning horizon
+    )
     
     pop = []
     for i in range(POP_SIZE):
         ppo_agent = PPO(
             observation_space=agilerl_obs_space,
             action_space=action_space,
-            device=device,
             index=i,
-            net_config={
-                "encoder_config": {
-                    "latent_dim": 256,
-                    "max_latent_dim": 512,
-                    "mlp_config": {"hidden_size": [256, 256]}
-                }, 
-                "head_config": {
-                    "hidden_size": [256] 
-                } 
-            },
+            hp_config=hp_config,
+            device=device,
+            net_config=net_config,
             batch_size=256,
-            ent_coef=0.02,
+            ent_coef=0.01,
             update_epochs=8,
             learn_step=update_steps,
             use_rollout_buffer=True,
         )
+        # Load checkpoint if provided
+        if load_path and os.path.exists(load_path):
+            print(f"Loading checkpoint for agent {i} from {load_path}")
+            ppo_agent.load_checkpoint(load_path)
+            
         # Track episodic rewards for this specific agent manually
         ppo_agent.fitness = [] # AgileRL expects a list
         pop.append(ppo_agent)
 
     tournament = TournamentSelection(
-        tournament_size=2,
+        tournament_size=3,
         elitism=True,
         population_size=POP_SIZE,
         eval_loop=1
     )
 
     mutations = Mutations(
-        no_mutation=0.1,
-        architecture=0.1,
-        new_layer_prob=0.1,
-        parameters=0.1,
-        activation=0.0, # disabled because it is unsupported for PPO
-        rl_hp=0.1,
-        mutation_sd=0.1,
+        # Relative probabilities normalized to sum to 1.0
+        no_mutation=0.20,   # 20% chance to just pass the elite through untouched
+        architecture=0.30,  # 30% chance to expand the network
+        parameters=0.20,    # 20% chance to mutate weights
+        rl_hp=0.30,         # 30% chance to mutate lr, batch_size, ent_coef, or gamma
+        activation=0.0,
+        
+        # Conditional probability: If architecture mutation triggers, 30% chance it's a new layer
+        new_layer_prob=0.30,
+        
+        # Drastically lowered to prevent collapsing the PPO policy
+        mutation_sd=0.01,
+        
         rand_seed=42,
         device=device
     )
     
-    evo_steps = 10000
-    next_evo_step = evo_steps
+    next_evo_step = EVO_STEPS
 
     total_steps = 0
     episode = 0
     start_time = time.time()
     last_checkpoint_time = start_time
+
+    # Metric tracking windows
+    recent_game_lengths = []
+    recent_winning_scores = []
+    recent_losing_scores = []
 
     try:
         while True:
@@ -131,7 +166,12 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
             last_value = {agent: None for agent in env.possible_agents}
             last_log_prob = {agent: None for agent in env.possible_agents}
             
-            episode_reward = 0.0
+            # Episode-specific metrics
+            ep_turns = 0
+            ep_purchases = 0
+            ep_reserves = 0
+            final_scores = {agent: 0 for agent in env.possible_agents}
+            winner_agent = None
 
             for agent in env.agent_iter():
                 obs, reward, term, trunc, info = env.last()
@@ -144,6 +184,10 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                     "action_mask": np.expand_dims(obs["action_mask"], axis=0).astype(bool)
                 }
 
+                # Update final scores if provided in info dict
+                if "points" in info:
+                    final_scores[agent] = info["points"]
+
                 if last_state[agent] is not None:
                     # Append the transition to this agent's temporary local list
                     trajectories[agent]["obs"].append(last_state[agent])
@@ -154,9 +198,9 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                     trajectories[agent]["log_prob"].append(last_log_prob[agent])
                     trajectories[agent]["action_mask"].append(last_action_mask[agent])
 
-                    episode_reward += reward
-
                 if done:
+                    if info.get("is_winner", False):
+                        winner_agent = agent
                     env.step(None)
                     continue
                     
@@ -164,30 +208,55 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                 current_ppo_agent = agent_mapping[agent]
                 action, log_prob, _, value = current_ppo_agent.get_action(batched_state, action_mask=batched_state["action_mask"])
                 scalar_action = int(action[0]) if isinstance(action, np.ndarray) else action
+
+                env.step(scalar_action)
                 
-                # Cache parameters for the NEXT loop for this agent
+                # Metric tracking: Action parsing
+                action_type = env.infos[agent]["action_type"]
+                if "buy" in action_type:
+                    ep_purchases += 1
+                elif "reserve" in action_type:
+                    ep_reserves += 1
+
                 last_state[agent] = batched_state
                 last_action_mask[agent] = batched_state["action_mask"]
                 last_action[agent] = scalar_action
                 last_value[agent] = value
                 last_log_prob[agent] = log_prob
                 
-                env.step(scalar_action)
+                ep_turns += 1
                 total_steps += 1
+                reward -= 0.1
 
-            # Episode ends. Now sequence all completed trajectories contiguously into the PPO buffer
+            # Process Episode Completion
+            recent_game_lengths.append(ep_turns)
+            
+            if winner_agent:
+                recent_winning_scores.append(final_scores[winner_agent])
+                losing_scores = [score for a, score in final_scores.items() if a != winner_agent]
+                if losing_scores:
+                    recent_losing_scores.append(np.mean(losing_scores))
+
             for env_agent in env.possible_agents:
                 traj_len = len(trajectories[env_agent]["obs"])
                 current_ppo_agent = agent_mapping[env_agent]
                 
-                # Accumulate the total reward for this individual's fitness score
-                ep_reward = sum(trajectories[env_agent]["reward"])
-                current_ppo_agent.fitness.append(ep_reward)
+                # -- NEW FITNESS METRIC --
+                # Fitness is no longer raw reward. It heavily weights winning and point accumulation.
+                is_win = 1 if env_agent == winner_agent else 0
+                points = final_scores[env_agent]
                 
-                # Check if adding this complete trajectory would overflow the buffer capacity
+                # Example structured fitness: +100 for a win, plus the raw points they scored.
+                # This ensures losers who score 14 points are ranked higher than losers who score 2 points.
+                agent_fitness = (is_win * 100) + points
+                current_ppo_agent.fitness.append(agent_fitness)
+                
+                # Log individual win rates directly to TensorBoard
+                slot_index = pop.index(current_ppo_agent)
+                writer.add_scalar(f"Win_Rate/Slot_{slot_index}", is_win, episode)
+                
                 if current_ppo_agent.rollout_buffer.size() + traj_len > update_steps:
                     if current_ppo_agent.rollout_buffer.size() > 0:
-                        # Since we just finished an episode, we know it ended in a terminal state
                         current_ppo_agent.rollout_buffer.compute_returns_and_advantages(
                             last_value=np.array([0.0]),
                             last_done=np.array([True])
@@ -206,15 +275,21 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
                         action_mask=trajectories[env_agent]["action_mask"][t]
                     )
 
-            # Episode ends
+            # Tensorboard Logging every 10 episodes
             if (episode + 1) % 10 == 0:
-                # episode_reward here represents the total combined rewards of all 4 agents
-                # meaning it's 4x larger nominally than a single agent view, but since zero-sum, it might be 0.
-                print(f"Episode: {episode + 1} | Total Steps (across all agents): {total_steps} | Combined Env Reward: {episode_reward:.2f}")
-                writer.add_scalar("Training/Combined_Episodic_Reward", episode_reward, episode + 1)
-                writer.add_scalar("Training/Total_Steps", total_steps, episode + 1)
+                avg_game_len = np.mean(recent_game_lengths[-10:])
+                avg_win_score = np.mean(recent_winning_scores[-10:]) if recent_winning_scores else 0
+                avg_lose_score = np.mean(recent_losing_scores[-10:]) if recent_losing_scores else 0
+                buy_reserve_ratio = ep_purchases / max(ep_reserves, 1) # Prevent div by zero
+                
+                writer.add_scalar("Gameplay/Average_Turns", avg_game_len, episode + 1)
+                writer.add_scalar("Gameplay/Winner_Average_Points", avg_win_score, episode + 1)
+                writer.add_scalar("Gameplay/Loser_Average_Points", avg_lose_score, episode + 1)
+                writer.add_scalar("Gameplay/Purchase_to_Reserve_Ratio", buy_reserve_ratio, episode + 1)
+                
+                print(f"Ep: {episode + 1} | Turns: {avg_game_len:.1f} | Win Pts: {avg_win_score:.1f} | Lose Pts: {avg_lose_score:.1f} | Buy/Res: {buy_reserve_ratio:.2f}")
             
-            # Checkpoint the elite dynamically before potentially doing a reduction on the fitness buffer
+            # Checkpoint Logic
             current_time = time.time()
             elapsed_minutes_since_ckpt = (current_time - last_checkpoint_time) / 60.0
             if (checkpoint_minutes and elapsed_minutes_since_ckpt >= checkpoint_minutes) or (checkpoint_episodes and (episode + 1) % checkpoint_episodes == 0):
@@ -229,17 +304,17 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
             # Evolution Step
             if total_steps >= next_evo_step:
                 print(f"--- Evolution Step triggered at {total_steps} steps ---")
-                next_evo_step += evo_steps
+                # Log Generational Mean Fitness before selection
+                gen_fitness = np.mean([np.mean(p.fitness) for p in pop if len(p.fitness) > 0])
+                writer.add_scalar("Evolution/Generational_Mean_Fitness", gen_fitness, episode)
+                next_evo_step += EVO_STEPS
                 
                 # Condense the generation's noisy array of episodic rewards into a single stable mean
                 # so that TournamentSelection (with eval_loop=1) evaluates true generational average performance!
                 for p_agent in pop:
                     p_agent.fitness = [sum(p_agent.fitness) / len(p_agent.fitness)] if len(p_agent.fitness) > 0 else [-1000.0]
 
-                # Tournament Selection
                 elite, survivors = tournament.select(pop)
-                
-                # Mutation
                 pop = mutations.mutation(survivors)
                 
                 # State Clearing: Prevent off-policy buffer poisoning and reset generational fitness
@@ -260,9 +335,18 @@ def train(max_episodes=1000, max_hours=None, checkpoint_minutes=None, checkpoint
         writer.flush()
         writer.close()
 
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train AgileRL PPO on Splendor")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to a checkpoint .pt file to resume training")
+    parser.add_argument("--episodes", type=int, default=5_000_000, help="Max episodes to train")
+    args = parser.parse_args()
+
+    # Pass the checkpoint path to the train function
     train(
-        max_episodes=20_000_000,
-        checkpoint_minutes=10.0, 
-        checkpoint_episodes=1_000
+        max_episodes=args.episodes,
+        checkpoint_minutes=10.0,
+        checkpoint_episodes=1_000,
+        checkpoint_dir="checkpoints",
+        load_path=args.checkpoint
     )

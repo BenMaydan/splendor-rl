@@ -373,7 +373,7 @@ class SplendorEnvAdapter:
         return {'error': "Noble not available"}
         
     def discard(self, color):
-        if self.current_phase != "discard":
+        if self.env.current_phase != "discard":
             return {'error': "Not in discard phase"}
         
         # Use the updated STR_TO_COLOR_INDEX which now contains '*'

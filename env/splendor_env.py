@@ -199,7 +199,7 @@ class SplendorEnv(AECEnv):
         }
         self.lose_points = 100
         self.win_points = (self.num_players - 1) * self.lose_points
-        self.discourage_stalling = -0.03
+        self.discourage_stalling = -0.1
         self.deadlock_tax = -50
 
         self.initialize_deck()
@@ -973,7 +973,8 @@ class SplendorEnv(AECEnv):
         # this is directly from the petting zoo documentation
         self._cumulative_rewards[agent] = 0
 
-        self.current_player = int(agent.split('_')[1])
+        acting_player_idx = int(agent.split('_')[1])
+        self.current_player = acting_player_idx
         action_dict = self.action_mapping[action]
 
         self._clear_rewards()
@@ -1039,22 +1040,40 @@ class SplendorEnv(AECEnv):
             for a in self.agents:
                 self.terminations[a] = is_terminated
                 self.truncations[a] = is_truncated
+
+                a_idx = int(a.split('_')[1])
+                self.infos[a] = {
+                    'points': self.points[a_idx],
+                    'is_winner': (a_idx == winner),
+                    'is_deadlock': is_deadlock,
+                }
+            
+            self.infos[agent].update({
+                'phase': self.current_phase,
+                'turn': acting_player_idx,
+                'action': action_dict,
+                'action_type': action_dict['type'],
+                'action_mask': self.action_mask,
+            })
                 
             # DO NOT update self.agent_selection here.
             # Leaving it on the current agent triggers the dead step logic on the next call.
         else:
             # ADVANCE TO NEXT PLAYER ONLY IF GAME CONTINUES
             self.agent_selection = f"player_{next_player}"
+
+            self.infos[agent] = {
+                'points': self.points[acting_player_idx], 
+                'phase': self.current_phase,
+                'turn': acting_player_idx,
+                'action': action_dict,
+                'action_type': action_dict['type'],
+                'action_mask': self.action_mask,
+                'is_deadlock': False,
+                'is_winner': False,
+            }
              
         self._accumulate_rewards()
-        
-        self.infos[agent] = {
-            'phase': self.current_phase,
-            'turn': self.current_player,
-            'action': action_dict,
-            'action_mask': self.action_mask,
-            'is_deadlock': is_deadlock
-        }
 
     def render(self):
         """
