@@ -15,13 +15,52 @@ from agilerl.hpo.mutation import Mutations
 from env.splendor_env import SplendorEnv
 
 
+# Define the stages of your curriculum
+# Format: {start_episode: [list_of_types_to_ALLOW]}
+TRAINING_CURRICULUM = {
+    0: ["take_3_diff_tokens", "take_2_diff_tokens", "take_1_token", "buy_face_up", "discard", "pick_noble"],
+    100000: ["take_3_diff_tokens", "take_2_diff_tokens", "take_1_token", "buy_face_up", "buy_reserved", "reserve_face_up", "discard", "pick_noble"],
+    250000: None # Disable curriculum (Allow all legal moves)
+}
+
+
+def apply_curriculum_mask(curriculum: dict[int, list[str]], env: SplendorEnv, observation, episode):
+    """
+    Masks specific action types based on the current training episode.
+    """
+    # Find the current stage
+    active_stage = None
+    for start_ep in sorted(curriculum.keys()):
+        if episode >= start_ep:
+            active_stage = curriculum[start_ep]
+    
+    # If we are in a restricted stage, refine the mask
+    if active_stage is not None:
+        new_mask = np.zeros_like(observation["action_mask"])
+        for action_type in active_stage:
+            s, e = env._action_indices_map[action_type]
+            # Only allow the action if it was already legal in the base environment
+            new_mask[s:e] = observation["action_mask"][s:e]
+        
+        # Ensure 'pass' is always available as a safety valve
+        s_p, e_p = env._action_indices_map["pass"]
+        if np.sum(new_mask) == 0:
+            new_mask[s_p:e_p] = 1
+            
+        observation["action_mask"] = new_mask
+        env.action_mask = new_mask
+
+    return observation
+
+
 def train(
         max_episodes=1000,
         max_hours=None,
         checkpoint_minutes=None,
         checkpoint_episodes=None,
         checkpoint_dir="checkpoints",
-        load_path=None
+        load_path=None,
+        use_training_curriculum=True,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
@@ -31,6 +70,14 @@ def train(
 
     # Initialize the AEC Splendor Environment
     env = SplendorEnv(num_players=4)
+
+    # Validate all action types in curriculum map are valid
+    all_action_types = env.get_action_types()
+    for action_types in TRAINING_CURRICULUM.values():
+        if action_types is None:
+            continue
+        for action_type in action_types:
+            assert action_type in all_action_types, f"Action type {action_type} is not in all environment action types!"
     
     # Extract spaces for AgileRL
     representative_agent = env.possible_agents[0]
@@ -176,6 +223,11 @@ def train(
             for agent in env.agent_iter():
                 obs, reward, term, trunc, info = env.last()
                 done = term or trunc
+
+                # Apply curriculum for training
+                # We apply the mask to the raw observation before flattening
+                if use_training_curriculum:
+                    obs = apply_curriculum_mask(TRAINING_CURRICULUM, env, obs, episode)
                 
                 # Flatten observation to match AgileRL expectations
                 flat_inner_state = utils.flatten(base_obs_space, obs["observation"])
@@ -339,7 +391,7 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train AgileRL PPO on Splendor")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a checkpoint .pt file to resume training")
-    parser.add_argument("--episodes", type=int, default=5_000_000, help="Max episodes to train")
+    parser.add_argument("--episodes", type=int, default=500_000, help="Max episodes to train")
     args = parser.parse_args()
 
     # Pass the checkpoint path to the train function
@@ -348,5 +400,6 @@ if __name__ == "__main__":
         checkpoint_minutes=10.0,
         checkpoint_episodes=1_000,
         checkpoint_dir="checkpoints",
-        load_path=args.checkpoint
+        load_path=args.checkpoint,
+        use_training_curriculum=True
     )

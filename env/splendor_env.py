@@ -482,7 +482,7 @@ class SplendorEnv(AECEnv):
         desc_colors.insert(self.gold_index, "Gold")
         for token_type in range(1 + len(self.colors)):
             self.action_mapping[action_idx] = {
-                "type": "discard_token",
+                "type": "discard",
                 "index": token_type,
                 "desc": f"Discard {desc_colors[token_type]} Gem"
             }
@@ -633,19 +633,7 @@ class SplendorEnv(AECEnv):
         action_types = set()
         for action_info in self.action_mapping.values():
             action_types.add(action_info["type"])
-    
-    def get_action_indices(self, action_type) -> NDArray[np.intp]:
-        """
-        Return all indices associated with an action type as a numpy array
-        """
-        action_indices = []
-        for action_idx, action_info in self.action_mapping.items():
-            if action_info["type"] != action_type:
-                continue
-            action_indices.append(action_idx)
-        
-        action_indices.sort()
-        return np.array(action_indices, dtype=np.intp)
+        return action_types
 
     def _token_cost(self, tokens_in_hand, discounts, card) -> None | NDArray[np.uint8]:
         """
@@ -955,7 +943,7 @@ class SplendorEnv(AECEnv):
                 # Rule enforcement: Turn ends immediately after picking a noble.
                 return (self.mini_rewards['get_noble'], "main", next_player)
 
-            case "discard_token":
+            case "discard":
                 assert self.current_phase == "discard", f"Discard action taken in {self.current_phase} phase!"
                 index = action["index"]
                 self.tokens_remaining[index] += 1
