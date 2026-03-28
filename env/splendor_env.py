@@ -144,6 +144,8 @@ class SplendorEnv(AECEnv):
 
         # the purchasability map is (num_players, num_tiers, num_slots)
         purchasability_shape = (self.max_num_players, self.num_tiers, self.num_slots)
+        purchasability_threat_shape = (self.max_num_players - 1, self.num_tiers, self.num_slots) # don't need to include threat on self
+        relative_costs_shape = (self.num_tiers, self.num_slots, len(self.colors))
 
         # setting observation limits about the dealt tensor
         dealt_shape = (self.num_tiers, self.num_slots, self.card_num_columns)
@@ -212,14 +214,20 @@ class SplendorEnv(AECEnv):
             "observation": spaces.Dict({
                 "phase": spaces.Discrete(len(self.phases)),
                 "relative_player_seat": spaces.Box(low=0, high=4, shape=(1,), dtype=np.uint8),
+
                 "tier_1_remaining": spaces.Box(low=0, high=self._max_num_cards_at_tier[0], shape=(1,), dtype=np.uint8),
                 "tier_2_remaining": spaces.Box(low=0, high=self._max_num_cards_at_tier[1], shape=(1,), dtype=np.uint8),
                 "tier_3_remaining": spaces.Box(low=0, high=self._max_num_cards_at_tier[2], shape=(1,), dtype=np.uint8),
                 "nobles_remaining": spaces.Box(low=0, high=5, shape=(1,), dtype=np.uint8),
                 "tokens_remaining": spaces.Box(low=0, high=7, shape=self.tokens_remaining.shape, dtype=np.uint8),
+
                 "purchasability": spaces.MultiBinary(purchasability_shape),
+                "purchasability_threat": spaces.MultiBinary(purchasability_threat_shape),
+                "relative_cost": spaces.Box(low=0, high=7, shape=relative_costs_shape, dtype=np.int8),
+
                 "dealt": spaces.Box(low=0, high=self.dealt_observation_limits_high, shape=dealt_shape, dtype=np.uint8),
                 "nobles": spaces.Box(low=self.nobles_observation_limits_low, high=self.nobles_observation_limits_high, shape=self.nobles.shape, dtype=np.uint8),
+
                 "points": spaces.Box(low=0, high=22, shape=self.points.shape, dtype=np.int8),
                 "reserved": spaces.Box(low=0, high=7, shape=self.reserved.shape, dtype=np.uint8),
                 "discounts": spaces.Box(low=0, high=self.max_num_of_color, shape=self.discounts.shape, dtype=np.int8),
@@ -618,6 +626,27 @@ class SplendorEnv(AECEnv):
             print(f"Num Dealt: {self.num_dealt_at_tier}")
             raise
 
+    def get_action_types(self) -> set[str]:
+        """
+        Return all possible action types generated in self.action_mapping
+        """
+        action_types = set()
+        for action_info in self.action_mapping.values():
+            action_types.add(action_info["type"])
+    
+    def get_action_indices(self, action_type) -> NDArray[np.intp]:
+        """
+        Return all indices associated with an action type as a numpy array
+        """
+        action_indices = []
+        for action_idx, action_info in self.action_mapping.items():
+            if action_info["type"] != action_type:
+                continue
+            action_indices.append(action_idx)
+        
+        action_indices.sort()
+        return np.array(action_indices, dtype=np.intp)
+
     def _token_cost(self, tokens_in_hand, discounts, card) -> None | NDArray[np.uint8]:
         """
         Determines the token cost (and if gold tokens are necessary) to buy a card
@@ -637,12 +666,11 @@ class SplendorEnv(AECEnv):
         result[self.gold_index] = gold_needed
         return result
     
-    def get_purchasability_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.bool_]:
+    def get_relative_costs(self, tokens_in_hand, discounts, cards) -> tuple[NDArray[np.int8], NDArray[np.int8]]:
         """
-        Determines the token cost (and if gold tokens are necessary) to buy a card.
-        Returns an unflattened mask matching the spatial dimensions of the cards.
+        Determines the token cost for a single player to buy a card.
+        Gold is excluded because of it's inherent ambiguity
         """
-        
         NUM_COLORS = len(self.colors)
 
         # --- INPUT SHAPE ASSERTIONS ---
@@ -685,6 +713,16 @@ class SplendorEnv(AECEnv):
 
         # Compute cost
         deficit_per_color = np.maximum(0, raw_costs - discounts - regular_tokens)
+
+        return deficit_per_color.astype(np.int8), gold_tokens.astype(np.int8)
+    
+    def get_purchasability_map(self, tokens_in_hand, discounts, cards) -> NDArray[np.bool_]:
+        """
+        Determines the token cost (and if gold tokens are necessary) to buy a card.
+        Returns an unflattened mask matching the spatial dimensions of the cards.
+        """
+        # Compute cost
+        deficit_per_color, gold_tokens = self.get_relative_costs(tokens_in_hand, discounts, cards)
         gold_needed = np.sum(deficit_per_color, axis=-1)
         
         # 1. Determine if the player can afford the raw cost
@@ -707,6 +745,62 @@ class SplendorEnv(AECEnv):
         # ------------------------------
         
         return purchasability_map
+
+    def get_purchasability_threat(self, tokens_in_hand, cards, deficit_per_color, gold_tokens) -> NDArray[np.bool_]:
+        """
+        Determines if a card is a 'threat' (can be purchased this turn OR next turn).
+        This evaluates whether the token deficit can be covered by a single legal token acquisition.
+        Returns an unflattened mask matching the spatial dimensions of the cards.
+        """
+        # Total raw deficit across all 5 colors
+        total_deficit = np.sum(deficit_per_color, axis=-1)
+        
+        # Deficit after applying the player's current gold tokens
+        net_deficit = total_deficit - gold_tokens
+        
+        # Extract bank state
+        bank_regular = self.tokens_remaining[:len(self.colors)]
+        bank_gold = self.tokens_remaining[self.gold_index]
+        
+        # --- Evaluate 1-Turn Acquisition Methods ---
+        
+        # Method 1: Draw up to 3 different tokens
+        # Which colors do we actually need that are also available in the bank?
+        needed_and_available = np.logical_and(deficit_per_color > 0, bank_regular > 0)
+        # Maximum number of useful, distinct tokens we could draw
+        max_gain_from_diff = np.minimum(3, np.sum(needed_and_available, axis=-1))
+        
+        # Method 2: Draw 2 of the same token
+        # We can draw 2 of a color if the bank has >= 4. 
+        # The useful gain is capped at 2, or our deficit in that color (whichever is lower).
+        useful_double_gain = np.where(bank_regular >= 4, np.minimum(2, deficit_per_color), 0)
+        max_gain_from_double = np.max(useful_double_gain, axis=-1)
+        
+        # Method 3: Reserve a card to gain 1 Gold
+        max_gain_from_reserve = 1 if bank_gold > 0 else 0
+        
+        # A card is a threat if it's already purchasable (net_deficit <= 0) OR
+        # the net deficit can be entirely bridged by one of the acquisition methods.
+        is_threat = np.logical_or.reduce((
+            net_deficit <= 0,
+            net_deficit <= max_gain_from_diff,
+            net_deficit <= max_gain_from_double,
+            net_deficit <= max_gain_from_reserve
+        ))
+        
+        # Finally, the card must actually be available on the board/in hand
+        availability_mask = cards[..., self.card_column_indexer['available']] == 1
+        purchasability_threat = np.logical_and(is_threat, availability_mask)
+        
+        # --- OUTPUT SHAPE ASSERTION ---
+        expected_output_shape = cards.shape[:-1]
+        if tokens_in_hand.ndim > 1:
+            expected_output_shape = (tokens_in_hand.shape[0],) + expected_output_shape
+
+        assert purchasability_threat.shape == expected_output_shape, f"Expected output shape {expected_output_shape}, got {purchasability_threat.shape}"
+        # ------------------------------
+        
+        return purchasability_threat
 
     def _end_of_turn_check(self) -> tuple[str, int]:
         """
@@ -910,6 +1004,13 @@ class SplendorEnv(AECEnv):
         # Compute purchasability using the ego-centric arrays
         # The agent now has a boolean map of exactly what IT can afford at index 0
         ego_purchasability = self.get_purchasability_map(ego_tokens_in_hand, ego_discounts, self.dealt)
+        relative_costs, relative_costs_gold_tokens = self.get_relative_costs(self.tokens_in_hand, self.discounts, self.dealt)
+        ego_purchasability_threat = np.roll(self.get_purchasability_threat(
+            self.tokens_in_hand,
+            self.dealt,
+            relative_costs,
+            relative_costs_gold_tokens
+        ), shift, axis=0)[1:] # we remove index 0 since the agent does not need to know the threat on itself
         
         # Generate the new observation state
         # Notice we use player_idx to structure the perspective
@@ -925,6 +1026,8 @@ class SplendorEnv(AECEnv):
                 "tokens_remaining": self.tokens_remaining,
 
                 "purchasability": ego_purchasability,
+                "purchasability_threat": ego_purchasability_threat,
+                "relative_cost": relative_costs[player_idx],
                 
                 "dealt": self.dealt,
                 "nobles": self.nobles,
