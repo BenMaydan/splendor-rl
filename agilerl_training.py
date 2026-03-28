@@ -60,7 +60,7 @@ def train(
         checkpoint_episodes=None,
         checkpoint_dir="checkpoints",
         load_path=None,
-        use_training_curriculum=True,
+        use_training_curriculum=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
@@ -401,5 +401,5 @@ if __name__ == "__main__":
         checkpoint_episodes=1_000,
         checkpoint_dir="checkpoints",
         load_path=args.checkpoint,
-        use_training_curriculum=True
+        use_training_curriculum=False
     )
