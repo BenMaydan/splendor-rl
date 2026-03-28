@@ -100,8 +100,7 @@ def train(
     net_config={
         "encoder_config": {
             "latent_dim": 256, 
-            "max_latent_dim": 512, 
-            # Start wider than ~400, then step down
+            "max_latent_dim": 2048,
             "mlp_config": {"hidden_size": [512, 256]} 
         }, 
         "head_config": {
@@ -159,8 +158,7 @@ def train(
         # Conditional probability: If architecture mutation triggers, 30% chance it's a new layer
         new_layer_prob=0.30,
         
-        # Drastically lowered to prevent collapsing the PPO policy
-        mutation_sd=0.01,
+        mutation_sd=0.1,
         
         rand_seed=42,
         device=device
