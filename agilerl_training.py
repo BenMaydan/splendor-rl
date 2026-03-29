@@ -276,7 +276,6 @@ def train(
                 
                 ep_turns += 1
                 total_steps += 1
-                reward -= 0.1
 
             # Process Episode Completion
             recent_game_lengths.append(ep_turns)
@@ -291,19 +290,16 @@ def train(
                 traj_len = len(trajectories[env_agent]["obs"])
                 current_ppo_agent = agent_mapping[env_agent]
                 
-                # -- NEW FITNESS METRIC --
-                # Fitness is no longer raw reward. It heavily weights winning and point accumulation.
-                is_win = 1 if env_agent == winner_agent else 0
-                points = final_scores[env_agent]
-                
-                # Example structured fitness: +100 for a win, plus the raw points they scored.
-                # This ensures losers who score 14 points are ranked higher than losers who score 2 points.
-                agent_fitness = (is_win * 100) + points
+                # -- FITNESS: Cumulative episode reward --
+                agent_fitness = sum(trajectories[env_agent]["reward"])
                 current_ppo_agent.fitness.append(agent_fitness)
                 
-                # Log individual win rates directly to TensorBoard
+                # Monitoring only: game-level outcomes for your own analysis
                 slot_index = pop.index(current_ppo_agent)
-                writer.add_scalar(f"Win_Rate/Slot_{slot_index}", is_win, episode)
+                is_win = 1 if env_agent == winner_agent else 0
+                points = final_scores[env_agent]
+                writer.add_scalar(f"Gameplay/WinRate_Slot_{slot_index}", is_win, episode)
+                writer.add_scalar(f"Gameplay/Points_Slot_{slot_index}", points, episode)
                 
                 if current_ppo_agent.rollout_buffer.size() + traj_len > update_steps:
                     if current_ppo_agent.rollout_buffer.size() > 0:
@@ -312,6 +308,7 @@ def train(
                             last_done=np.array([True])
                         )
                         loss = current_ppo_agent.learn()
+                        writer.add_scalar("Loss/Policy", loss, total_steps)
                         current_ppo_agent.rollout_buffer.reset()
 
                 for t in range(traj_len):
@@ -364,8 +361,8 @@ def train(
                 for p_agent in pop:
                     p_agent.fitness = [sum(p_agent.fitness) / len(p_agent.fitness)] if len(p_agent.fitness) > 0 else [-1000.0]
 
-                elite, survivors = tournament.select(pop)
-                pop = mutations.mutation(survivors)
+                elite, pop = tournament.select(pop)
+                pop = mutations.mutation(pop)
                 
                 # State Clearing: Prevent off-policy buffer poisoning and reset generational fitness
                 for p_agent in pop:

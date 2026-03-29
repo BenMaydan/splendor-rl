@@ -234,12 +234,12 @@ class SplendorEnv(AECEnv):
                 "num_cards_in_hand": spaces.Box(low=0, high=30, shape=self.num_cards_in_hand.shape, dtype=np.uint8),
                 "tokens_in_hand": spaces.Box(low=0, high=7, shape=self.tokens_in_hand.shape, dtype=np.int8)
             }),
-            "action_mask": spaces.MultiBinary((self.num_total_actions,))
+            "action_mask": spaces.Box(low=0, high=1, shape=(self.num_total_actions,), dtype=np.uint8)
         })
 
         # initializing action mapping and mask
         self.action_mapping = {}
-        self.action_mask = np.ones((self.num_total_actions,), dtype=bool)
+        self.action_mask = np.ones((self.num_total_actions,), dtype=np.uint8)
         self._build_action_space()
 
         # for global deadlocks - an early truncation mechanism if all players pass in a row
@@ -1002,6 +1002,7 @@ class SplendorEnv(AECEnv):
         
         # Generate the new observation state
         # Notice we use player_idx to structure the perspective
+        self._generate_action_mask()
         observation = {
             "observation": {
                 "phase": self.phases.index(self.current_phase),
