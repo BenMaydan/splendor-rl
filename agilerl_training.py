@@ -99,21 +99,30 @@ def train(
 
     net_config={
         "encoder_config": {
-            "latent_dim": 256, 
-            "max_latent_dim": 2048,
-            "mlp_config": {"hidden_size": [512, 256]} 
-        }, 
+            "latent_dim": 256,
+            "max_latent_dim": 1024,
+            "mlp_config": {"hidden_size": [512, 512]}
+        },
         "head_config": {
             # A slightly deeper head for complex action evaluation
-            "hidden_size": [256, 128] 
-        } 
+            "hidden_size": [256, 256]
+        }
     }
 
     hp_config = HyperparameterConfig(
-        lr=RLParameter(min=1e-5, max=1e-3),
-        batch_size=RLParameter(min=64, max=512, dtype=int),
-        ent_coef=RLParameter(min=0.001, max=0.03),
-        gamma=RLParameter(min=0.90, max=0.999) # Allow evolution of the planning horizon
+        # Logarithmic Parameters: Can handle 20% swings
+        lr=RLParameter(min=1e-5, max=1e-3, grow_factor=1.2, shrink_factor=0.8),
+        batch_size=RLParameter(min=64, max=512, dtype=int, grow_factor=1.2, shrink_factor=0.8),
+        
+        # Sensitive Coefficients: Restrict to 10% swings to prevent loss function collapse
+        ent_coef=RLParameter(min=0.001, max=0.05, grow_factor=1.1, shrink_factor=0.9),
+        clip_coef=RLParameter(min=0.1, max=0.3, grow_factor=1.1, shrink_factor=0.9),
+        vf_coef=RLParameter(min=0.1, max=1.0, grow_factor=1.1, shrink_factor=0.9),
+        
+        # Hyper-Sensitive Horizon Parameters: Microscopic swings (0.2% to 0.5%)
+        # Your previous 1.0010204... was on the right track, but 1.002 is much cleaner and just as safe.
+        gamma=RLParameter(min=0.98, max=0.999, grow_factor=1.002, shrink_factor=0.998),
+        gae_lambda=RLParameter(min=0.90, max=0.99, grow_factor=1.005, shrink_factor=0.995)
     )
     
     pop = []
@@ -125,10 +134,23 @@ def train(
             hp_config=hp_config,
             device=device,
             net_config=net_config,
+
+            # --- Baseline for Evolvable Params ---
             batch_size=256,
             ent_coef=0.01,
-            update_epochs=8,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_coef=0.2,       # Baseline clip
+            vf_coef=0.5,         # Baseline value coefficient
+            
+            # --- Static Safety Parameters ---
+            max_grad_norm=0.5,   # Prevents math errors (exploding gradients)
+            target_kl=0.015,     # Early stopping for the epochs
+            update_epochs=8,     # Safe to leave at 8 because target_kl will stop it early if needed
             learn_step=update_steps,
+            
+            # --- Architecture Flags ---
+            share_encoders=True, # Efficient learning for board games
             use_rollout_buffer=True,
         )
         # Load checkpoint if provided
@@ -149,14 +171,14 @@ def train(
 
     mutations = Mutations(
         # Relative probabilities normalized to sum to 1.0
-        no_mutation=0.20,   # 20% chance to just pass the elite through untouched
-        architecture=0.30,  # 30% chance to expand the network
-        parameters=0.20,    # 20% chance to mutate weights
-        rl_hp=0.30,         # 30% chance to mutate lr, batch_size, ent_coef, or gamma
+        no_mutation=0.10,   # 10% chance to pass through untouched
+        architecture=0.0,   # 0% chance - Architecture is now completely locked
+        parameters=0.40,    # 40% chance to mutate existing weights (increased)
+        rl_hp=0.50,         # 50% chance to mutate learning rate, gamma, etc. (increased)
         activation=0.0,
         
         # Conditional probability: If architecture mutation triggers, 30% chance it's a new layer
-        new_layer_prob=0.30,
+        new_layer_prob=0.10,
         
         mutation_sd=0.1,
         
@@ -369,16 +391,24 @@ def train(
                     # Log Encoder Hidden Sizes
                     encoder_layers = elite.net_config.get("encoder_config", {}).get("mlp_config", {}).get("hidden_size", [])
                     for idx, size in enumerate(encoder_layers):
-                        writer.add_scalar(f"Architecture/Elite_Encoder_Layer_{idx}_Size", size, episode)
+                        writer.add_scalar(f"Hyperparameters/Elite_Encoder_Layer_{idx}_Size", size, episode)
                     
                     # Log Head Hidden Sizes
                     head_layers = elite.net_config.get("head_config", {}).get("hidden_size", [])
                     for idx, size in enumerate(head_layers):
-                        writer.add_scalar(f"Architecture/Elite_Head_Layer_{idx}_Size", size, episode)
+                        writer.add_scalar(f"Hyperparameters/Elite_Head_Layer_{idx}_Size", size, episode)
                         
                     # Log Latent Dimension
                     latent_dim = elite.net_config.get("encoder_config", {}).get("latent_dim", 0)
-                    writer.add_scalar("Architecture/Elite_Latent_Dim", latent_dim, episode)
+                    writer.add_scalar("Hyperparameters/Elite_Latent_Dim", latent_dim, episode)
+                
+                writer.add_scalar("Hyperparameters/Elite_LR", elite.lr, episode)
+                writer.add_scalar("Hyperparameters/Elite_Batch_Size", elite.batch_size, episode)
+                writer.add_scalar("Hyperparameters/Elite_Ent_Coef", elite.ent_coef, episode)
+                writer.add_scalar("Hyperparameters/Elite_Clip_Coef", elite.clip_coef, episode)
+                writer.add_scalar("Hyperparameters/Elite_Vf_Coef", elite.vf_coef, episode)
+                writer.add_scalar("Hyperparameters/Elite_Gamma", elite.gamma, episode)
+                writer.add_scalar("Hyperparameters/Elite_Gae_Lambda", elite.gae_lambda, episode)
 
                 # Proceed with mutations
                 pop = mutations.mutation(pop)
