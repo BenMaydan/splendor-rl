@@ -298,8 +298,8 @@ def train(
                 slot_index = pop.index(current_ppo_agent)
                 is_win = 1 if env_agent == winner_agent else 0
                 points = final_scores[env_agent]
-                writer.add_scalar(f"Gameplay/WinRate_Slot_{slot_index}", is_win, episode)
-                writer.add_scalar(f"Gameplay/Points_Slot_{slot_index}", points, episode)
+                writer.add_scalar(f"Population/WinRate_Slot_{slot_index}", is_win, episode)
+                writer.add_scalar(f"Population/Points_Slot_{slot_index}", points, episode)
                 
                 if current_ppo_agent.rollout_buffer.size() + traj_len > update_steps:
                     if current_ppo_agent.rollout_buffer.size() > 0:
@@ -362,6 +362,25 @@ def train(
                     p_agent.fitness = [sum(p_agent.fitness) / len(p_agent.fitness)] if len(p_agent.fitness) > 0 else [-1000.0]
 
                 elite, pop = tournament.select(pop)
+
+                # Log Architecture Hyperparameters of the Elite
+                # Access the net_config which AgileRL updates during mutation
+                if hasattr(elite, 'net_config'):
+                    # Log Encoder Hidden Sizes
+                    encoder_layers = elite.net_config.get("encoder_config", {}).get("mlp_config", {}).get("hidden_size", [])
+                    for idx, size in enumerate(encoder_layers):
+                        writer.add_scalar(f"Architecture/Elite_Encoder_Layer_{idx}_Size", size, episode)
+                    
+                    # Log Head Hidden Sizes
+                    head_layers = elite.net_config.get("head_config", {}).get("hidden_size", [])
+                    for idx, size in enumerate(head_layers):
+                        writer.add_scalar(f"Architecture/Elite_Head_Layer_{idx}_Size", size, episode)
+                        
+                    # Log Latent Dimension
+                    latent_dim = elite.net_config.get("encoder_config", {}).get("latent_dim", 0)
+                    writer.add_scalar("Architecture/Elite_Latent_Dim", latent_dim, episode)
+
+                # Proceed with mutations
                 pop = mutations.mutation(pop)
                 
                 # State Clearing: Prevent off-policy buffer poisoning and reset generational fitness

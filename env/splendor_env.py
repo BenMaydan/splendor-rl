@@ -180,12 +180,6 @@ class SplendorEnv(AECEnv):
         self.max_num_nobles = self.max_num_players + 1
         self.initialize_nobles()
 
-        # initialize nobles observation limits only once
-        self.nobles_observation_limits_low = np.zeros(self.nobles.shape, dtype=np.uint8)
-        self.nobles_observation_limits_high = np.zeros(self.nobles.shape, dtype=np.uint8)
-        self.nobles_observation_limits_low[:] = np.min(self._all_nobles, axis=0)
-        self.nobles_observation_limits_high[:] = np.max(self._all_nobles, axis=0)
-
         self.phases = ['main', 'pick_noble', 'discard']
         self.current_phase = 'main'
         self.starting_player = 0
@@ -208,8 +202,6 @@ class SplendorEnv(AECEnv):
         self.initialize_misc()
 
         # initializing observation space
-        # TODO: make all observations about costs be relative to the player
-        # so dealt for example should be the cost for the player who can buy it
         self.single_observation_space = spaces.Dict({
             "observation": spaces.Dict({
                 "phase": spaces.Discrete(len(self.phases)),
@@ -223,15 +215,13 @@ class SplendorEnv(AECEnv):
 
                 "purchasability": spaces.MultiBinary(purchasability_shape),
                 "purchasability_threat": spaces.MultiBinary(purchasability_threat_shape),
-                "relative_cost": spaces.Box(low=0, high=7, shape=relative_costs_shape, dtype=np.int8),
+                "relative_cost": spaces.Box(low=0, high=np.iinfo(np.int8).max, shape=relative_costs_shape, dtype=np.int8),
 
-                "dealt": spaces.Box(low=0, high=self.dealt_observation_limits_high, shape=dealt_shape, dtype=np.uint8),
-                "nobles": spaces.Box(low=self.nobles_observation_limits_low, high=self.nobles_observation_limits_high, shape=self.nobles.shape, dtype=np.uint8),
+                "nobles": spaces.Box(low=np.min(self._all_nobles), high=np.iinfo(np.int8).max, shape=(self.max_num_players, self.max_num_nobles, len(self.colors)), dtype=np.int8),
 
-                "points": spaces.Box(low=0, high=22, shape=self.points.shape, dtype=np.int8),
+                "points": spaces.Box(low=-7, high=15, shape=self.points.shape, dtype=np.int8),
                 "reserved": spaces.Box(low=0, high=7, shape=self.reserved.shape, dtype=np.uint8),
                 "discounts": spaces.Box(low=0, high=self.max_num_of_color, shape=self.discounts.shape, dtype=np.int8),
-                "num_cards_in_hand": spaces.Box(low=0, high=30, shape=self.num_cards_in_hand.shape, dtype=np.uint8),
                 "tokens_in_hand": spaces.Box(low=0, high=7, shape=self.tokens_in_hand.shape, dtype=np.int8)
             }),
             "action_mask": spaces.Box(low=0, high=1, shape=(self.num_total_actions,), dtype=np.uint8)
@@ -635,6 +625,29 @@ class SplendorEnv(AECEnv):
             action_types.add(action_info["type"])
         return action_types
 
+    def get_nobles_distance(self):
+        """
+        Calculates the relative distance in discounts for all players to acquire nobles.
+        Returns an array of shape (max_num_players, max_num_nobles, len(colors)).
+        """
+        # Extract the color requirements for the nobles, shape: (max_num_nobles, num_colors)
+        noble_costs = self.nobles[..., self.nobles_color_indices]
+        
+        # Reshape discounts for broadcasting: (max_num_players, 1, num_colors)
+        discounts_expanded = np.expand_dims(self.discounts, axis=1)
+        
+        # Calculate the deficit per color (how many more discounts are needed)
+        # Any negative deficit means the player has surplus discounts, so we floor it at 0
+        distance = np.maximum(0, noble_costs - discounts_expanded).astype(np.int8)
+        
+        # Identify unavailable nobles
+        unavailable_mask = self.nobles[..., self.nobles_column_indexer['available']] == 0
+        
+        # Set unavailable nobles to the maximum value for np.int8
+        distance[:, unavailable_mask, :] = np.iinfo(np.int8).max
+        
+        return distance
+
     def _token_cost(self, tokens_in_hand, discounts, card) -> None | NDArray[np.uint8]:
         """
         Determines the token cost (and if gold tokens are necessary) to buy a card
@@ -986,19 +999,27 @@ class SplendorEnv(AECEnv):
         ego_points = np.roll(self.points, shift, axis=0)
         ego_reserved = np.roll(self.reserved, shift, axis=0)
         ego_discounts = np.roll(self.discounts, shift, axis=0)
-        ego_num_cards_in_hand = np.roll(self.num_cards_in_hand, shift, axis=0)
         ego_tokens_in_hand = np.roll(self.tokens_in_hand, shift, axis=0)
 
         # Compute purchasability using the ego-centric arrays
         # The agent now has a boolean map of exactly what IT can afford at index 0
         ego_purchasability = self.get_purchasability_map(ego_tokens_in_hand, ego_discounts, self.dealt)
+
         relative_costs, relative_costs_gold_tokens = self.get_relative_costs(self.tokens_in_hand, self.discounts, self.dealt)
+        # we set relative costs per token to "inf" for every unavailable card
+        inf_value = np.iinfo(relative_costs.dtype).max
+        unavailable_mask = self.dealt[..., self.card_column_indexer['available']] == 0
+        relative_costs[:, unavailable_mask] = inf_value
+
         ego_purchasability_threat = np.roll(self.get_purchasability_threat(
             self.tokens_in_hand,
             self.dealt,
             relative_costs,
             relative_costs_gold_tokens
         ), shift, axis=0)[1:] # we remove index 0 since the agent does not need to know the threat on itself
+
+        relative_nobles = self.get_nobles_distance()
+        ego_nobles = np.roll(relative_nobles, shift, axis=0)
         
         # Generate the new observation state
         # Notice we use player_idx to structure the perspective
@@ -1018,13 +1039,11 @@ class SplendorEnv(AECEnv):
                 "purchasability_threat": ego_purchasability_threat,
                 "relative_cost": relative_costs[player_idx],
                 
-                "dealt": self.dealt,
-                "nobles": self.nobles,
+                "nobles": ego_nobles,
                 
-                "points": ego_points,
+                "points": (15 - ego_points).astype(np.int8), # Points now tells you how many points away from winning you are
                 "reserved": ego_reserved,
                 "discounts": ego_discounts,
-                "num_cards_in_hand": ego_num_cards_in_hand,
                 "tokens_in_hand": ego_tokens_in_hand
             },
             

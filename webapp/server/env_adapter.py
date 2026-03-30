@@ -216,7 +216,7 @@ class SplendorEnvAdapter:
                     elif typ == 'pick_noble':
                         noble = self.env.nobles[mapping['index']]
                         valid_actions['noble'].append(self.noble_sig_to_uuid.get(self._noble_sig(noble)))
-                    elif typ == 'discard_token':
+                    elif typ == 'discard':
                         valid_actions['discard'].append(COLOR_INDEX_TO_STR[mapping['index']])
                     elif typ in ['take_3_diff_tokens', 'take_2_diff_tokens', 'take_1_token']:
                         for i in mapping['indices']:
@@ -277,7 +277,7 @@ class SplendorEnvAdapter:
         elif t == 'pick_noble':
             noble = self.env.nobles[mapping['index']]
             return f"{name} was visited by a {format_card(noble, is_noble=True)}"
-        elif t == 'discard_token':
+        elif t == 'discard':
             c = f"[{COLOR_INDEX_TO_STR[mapping['index']]}]"
             return f"{name} discarded {c}"
         elif t == 'pass':
@@ -381,7 +381,7 @@ class SplendorEnvAdapter:
             return {'error': f"Unknown color: {color}"}
             
         c_idx = STR_TO_COLOR_INDEX[color]
-        a_idx = self._get_action_index(lambda m: m['type'] == 'discard_token' and m['index'] == c_idx)
+        a_idx = self._get_action_index(lambda m: m['type'] == 'discard' and m['index'] == c_idx)
         if a_idx is not None:
             return self._execute_action_idx(a_idx)
         return {'error': "Invalid discard"}
